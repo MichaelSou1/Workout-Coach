@@ -1,0 +1,40 @@
+# ============================================================================
+# Workout Coach - Multimodal Fitness Action Correction System
+# ============================================================================
+# 推荐安装步骤（Windows + CUDA 11.8）：
+# 
+# 1. 创建 Conda 环境：
+#    conda create -n workout-coach python=3.10
+#    conda activate workout-coach
+#
+# 2. 安装 PyTorch with CUDA（选择合适的版本）：
+#    # 对于 RTX 4060 建议使用 CUDA 11.8 或 12.1
+#    conda install pytorch::pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+#    # 或使用 pip：
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+#
+# 3. 安装其他依赖：
+#    pip install -r requirements.txt
+#
+# ============================================================================
+
+# 核心 LLM 和视觉模型依赖
+transformers>=4.37.0          # 用于 Qwen2-VL-2B-Instruct 模型加载和推理
+huggingface_hub>=0.20.3       # 模型快照下载（离线缓存）
+accelerate>=0.25.0            # 模型加速和分布式推理优化
+peft>=0.7.1                   # 参数高效微调库，支持 LoRA 等
+
+# 显存优化（4-bit 量化）
+bitsandbytes>=0.41.3          # Windows 环境需要 >=0.41.3 版本以支持 4-bit 量化
+
+# 计算机视觉和图像处理
+opencv-python>=4.8.0          # 视频流捕获和处理
+pillow>=10.0.0                # PIL 图像处理库
+numpy>=1.24.0                 # 数值计算
+
+# 工具和实用库
+python-dotenv>=1.0.0          # 环境变量管理
+tqdm>=4.66.0                  # 进度条显示
+
+# 可选：日志和调试
+loguru>=0.7.2                 # 高级日志库

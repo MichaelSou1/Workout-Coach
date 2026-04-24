@@ -1,6 +1,6 @@
 # 🏋️ Workout Coach（VLM 健身动作纠正）
 
-> 基于 **Qwen2-VL-2B-Instruct** 的本地端侧多模态项目：实时采集视频流，异步推理动作问题，并将反馈叠加到画面中。
+> 基于 **Qwen2-VL-7B-Instruct** 的本地端侧多模态项目：支持摄像头实时采集或本地视频文件输入，异步推理动作问题，并将反馈叠加到画面中。
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-red)
@@ -12,16 +12,18 @@
 
 这是一个面向多模态岗位的工程化 Demo，重点解决三个问题：
 
-1. **8GB 显存下的 VLM 部署**（4-bit 量化）
-2. **实时视频循环不卡顿**（异步推理）
-3. **输出可执行动作建议**（可视化反馈）
+1. **8GB 显存下的 VLM 部署**（4-bit 量化 + low_cpu_mem_usage）
+2. **实时视频循环不卡顿**（异步推理 + 多线程）
+3. **输出可执行动作建议**（结构化 prompt + 可视化反馈）
 
 ---
 
 ## ✨ 核心亮点
 
-- **端侧部署**：Qwen2-VL-2B-Instruct + BitsAndBytes 4-bit
-- **实时交互**：OpenCV 摄像头流 + 键盘触发分析
+- **端侧部署**：Qwen2-VL-7B-Instruct + BitsAndBytes 4-bit，~5.5GB VRAM
+- **双输入模式**：摄像头实时拍摄 / 本地视频文件（mp4、mov、mkv 等）
+- **任意动作支持**：不依赖预设动作库，输入任意动作名称，VLM 自动核验并分析
+- **动作核验**：VLM 对比用户声称动作与画面内容，不符时自动识别真实动作
 - **系统设计**：采样缓冲队列 + 后台推理线程 + 回调渲染
 - **工程可维护**：`.env` 配置、模块化结构、离线模式支持
 
@@ -31,14 +33,15 @@
 
 ```
 Workout-Coach/
-├── action_profiles.py        # 动作类型与提示词模板
-├── download_model.py         # 模型预下载脚本
+├── input/                    # 放置待分析的本地视频文件
+├── action_profiles.py        # 动作分析提示词构建（动态，支持任意动作）
+├── download_model.py         # 模型预下载脚本（支持 HuggingFace / ModelScope）
 ├── vlm_inference.py          # VLM 推理核心（同步/异步）
-├── video_streamer.py         # 视频采样、缓冲与按键触发
+├── video_streamer.py         # 视频采样、缓冲与触发
 ├── main.py                   # 主程序入口
 ├── config.env.example        # 环境变量模板
 ├── requirements.txt          # 依赖列表
-├── .gitignore                # Git 忽略规则（模型缓存/.env 等）
+├── .gitignore
 └── README.md
 ```
 
@@ -55,8 +58,6 @@ conda activate workout-coach
 
 ### 2) 安装 PyTorch（CUDA）
 
-**推荐：CUDA 11.8（RTX 4060 稳定）**
-
 ```bash
 conda install pytorch::pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
 ```
@@ -69,29 +70,35 @@ pip install -r requirements.txt
 
 ### 4) 配置 `.env`
 
-复制 `config.env.example` 为 `.env`，按需修改：
-
 ```powershell
 Copy-Item config.env.example .env
 ```
 
-（Git Bash / macOS / Linux 可用：`cp config.env.example .env`）
+打开 `.env`，填写模型路径（下载完成后脚本会打印）：
 
-- `VLM_MODEL_NAME=Qwen/Qwen2-VL-2B-Instruct`
-- `VLM_LOCAL_FILES_ONLY=0`（首次下载）
-
-若在中国大陆，可设置：
-
-```powershell
-$env:HF_ENDPOINT = "https://hf-mirror.com"
-$env:HUGGINGFACE_HUB_ENDPOINT = "https://hf-mirror.com"
+```
+VLM_MODEL_NAME=<模型本地路径或 HF model id>
+HF_HOME=C:/Users/<你的用户名>/Desktop/Workout-Coach/hf_cache
+VLM_LOCAL_FILES_ONLY=1
+HF_HUB_OFFLINE=1
 ```
 
-### 5) 可选：预下载模型
+### 5) 下载模型
 
-```powershell
-python download_model.py --model Qwen/Qwen2-VL-2B-Instruct --cache-dir .\hf_cache
+**方式 A：ModelScope（国内推荐，速度快）**
+
+```bash
+pip install modelscope
+python download_model.py --model Qwen/Qwen2-VL-7B-Instruct --source modelscope
 ```
+
+**方式 B：HuggingFace 镜像**
+
+```bash
+python download_model.py --model Qwen/Qwen2-VL-7B-Instruct
+```
+
+下载完成后，脚本会输出建议写入 `.env` 的配置，复制粘贴即可。
 
 ---
 
@@ -102,300 +109,166 @@ conda activate workout-coach
 python main.py
 ```
 
-> 离线模式下（`VLM_LOCAL_FILES_ONLY=1`），程序仅使用本地缓存。
+### 启动流程
 
-### 启动流程说明
+1. **VLM 模型加载**（约 30 秒）
+   - 4-bit 量化加载，稳态显存占用约 5.5GB
 
-1. **VLM 模型加载**（15-30 秒）
-   - 首次运行会从 Hugging Face 下载 Qwen2-VL-2B-Instruct 模型
-   - 显存会从 0GB 升到 ~4-5GB（4-bit 量化）
+2. **选择视频输入源**
+   - 将视频文件放入 `input/` 目录，程序启动时自动扫描并列出
+   - 选择文件编号使用文件模式；回车或选 `0` 使用摄像头
 
-2. **摄像头初始化**（1-2 秒）
-   - 打开本地摄像头，显示实时视频
+3. **输入动作名称**
+   - 支持任意动作，如：深蹲、硬拉、哑铃飞鸟、引体向上、推肩……
+   - 直接回车使用默认：深蹲
 
-3. **就绪**
-   - 继续做动作，完成后按 **'S'** 键触发分析
+4. **就绪**
+   - 文件模式：视频自动播放，播放结束后自动触发分析
+   - 摄像头模式：按 **S** 键触发分析
 
 ---
 
-## 🎮 使用快捷键
+## 🎮 快捷键
 
-| 快捷键 | 功能 |
-|--------|------|
-| 启动后 CLI 输入 | 选择动作类型（支持自定义，如：哑铃飞鸟） |
-| **S** | 触发定时分析（先倒计时 5 秒，再录制 10 秒发送给 VLM） |
-| **Q** | 退出程序 |
+| 模式 | 快捷键 | 功能 |
+|------|--------|------|
+| 摄像头 | **S** | 倒计时 5 秒后录制 10 秒，发送给 VLM 分析 |
+| 文件 | **S** | 立即触发分析（使用已采样的帧） |
+| 通用 | **Q** | 退出程序 |
 
 ---
 
 ## 📊 工作流说明
 
-### 动作分析流程
-
 ```
-摄像头 → 帧采样缓冲（15帧） → 用户按S键 → VLM异步推理 → 建议显示在视频上
-```
-
-1. **连续采样**
-   - 每 10 帧采 1 帧（降低推理显存压力）
-   - 缓存 15 帧为一个"窗口"
-   - 每帧短边缩放到 336 像素
-
-2. **按 'S' 键触发分析**
-   - 先倒计时 5 秒（用于走位准备）
-   - 再自动录制 10 秒动作序列并发送给 VLM
-   - VLM 在后台异步推理，不阻塞视频显示
-
-3. **VLM 推理**（5-10 秒）
-   - System Prompt：角色定义 + 任务说明
-   - User Query：具体分析指令
-   - 输出：专业的动作纠正建议
-
-4. **反馈显示**
-   - 建议文字以绿色显示在视频左上角
-   - 持续显示 4 秒后消失
-
----
-
-## 📝 核心代码架构
-
-### 1. `vlm_inference.py` - VLM 推理类
-
-```python
-from vlm_inference import FitnessVLM
-
-vlm = FitnessVLM(model_name="Qwen/Qwen2-VL-2B-Instruct", device="cuda")
-
-# 同步推理
-result = vlm.analyze_fitness_frames(
-    frames=[PIL_image_1, PIL_image_2, ...],
-    system_prompt="你是专业教练...",
-    user_query="分析这些帧中的问题"
-)
-
-# 或异步推理（推荐，不阻塞UI）
-vlm.analyze_fitness_frames_async(
-    frames=[...],
-    system_prompt="...",
-    callback=lambda result: print(result)
-)
+输入源（摄像头/文件）
+    → 按短边缩放（横竖屏自适应，默认 336px）
+    → 每 10 帧采 1 帧，存入缓冲队列
+    → 触发分析（按 S / 文件播放结束）
+    → 均匀抽取最多 8 帧 → VLM 异步推理
+    → 结果叠加到画面左上角（显示 4 秒）
 ```
 
-### 2. `video_streamer.py` - 视频流处理
+### VLM 分析逻辑
 
-```python
-from video_streamer import VideoStreamer
+每次推理时，VLM 会：
 
-vs = VideoStreamer(
-    camera_id=0,
-    buffer_size=15,        # 缓冲 15 帧
-    sample_rate=10,        # 每 10 帧采 1 帧
-    target_height=336      # 缩放目标高度
-)
+1. **核验动作**：对比用户声称的动作与画面内容是否一致
+   - 一致 → `【画面动作】深蹲`
+   - 不一致 → `【画面动作】硬拉（用户声称：深蹲）`
+2. **评判质量**：给出总体结论、3 个关键问题（问题/原因/修正）、下一组执行口令
 
-# 设置触发回调
-vs.on_analysis_trigger = lambda frames: analyze(frames)
+**输出示例**：
 
-# 启动（阻塞直到用户按 Q）
-vs.start()
 ```
-
-### 3. `main.py` - 完整集成
-
-整合 VLM 和视频流，处理数据流向和 UI 反馈。
+【画面动作】杠铃深蹲
+【总体结论】动作整体较为标准，但膝盖稍微内扣，需注意向外打开。
+【关键问题1】问题：膝盖内扣；原因：下降过程中膝盖未保持向外；修正：确保大腿与脚尖方向一致。
+【关键问题2】问题：背部略微前倾；原因：核心收紧不足；修正：保持脊柱中立位。
+【关键问题3】问题：杠铃位置偏高；原因：影响稳定性；修正：调整杠铃至合适背部位置。
+【下一组执行口令】1. 膝盖向外打开；2. 挺胸收核心；3. 调整杠铃位置。
+```
 
 ---
 
 ## ⚠️ 常见问题
 
-### Q1: 首次运行很慢/卡住
+### Q1: 加载模型时 OOM（显存溢出）
 
-**原因**: 模型首次从 Hugging Face 下载（1-2GB）
+**原因**：BitsAndBytes 量化过程中的峰值显存高于稳态
 
-**解决**:
-- 检查网络连接
-- 或提前下载: `huggingface-cli download Qwen/Qwen2-VL-2B-Instruct`
-- 中国大陆网络建议先设置镜像：`$env:HF_ENDPOINT="https://hf-mirror.com"`
+**解决**：已内置 `low_cpu_mem_usage=True`，权重先在 CPU 处理再搬到 GPU，消除加载峰值。若仍 OOM，关闭其他占用 GPU 的程序后重试。
 
-### Q1.1: `download_model.py` 出现 WinError 1314（权限不足）
+### Q2: 推理时间较长（约 2 分钟）
 
-**原因**: Windows 未开启符号链接权限（Developer Mode/管理员权限）。
+**原因**：Windows 上 FlashAttention2 不可用，回退到 SDPA，7B 模型 + 8 帧正常耗时
 
-**解决**:
-- 已内置自动回退：脚本会自动切换为“无符号链接模式”下载到 `hf_cache/local_models/...`
-- 重新执行：`python download_model.py --model Qwen/Qwen2-VL-2B-Instruct --cache-dir .\hf_cache`
-- 下载后将 `.env` 中 `VLM_MODEL_NAME` 设为本地目录路径（脚本会打印）
-
-### Q2: GPU 显存溢出 (OOM)
-
-**原因**: 8GB 显存不足或有其他 GPU 占用进程
-
-**解决**:
-- 减少 `buffer_size`（默认 15，改为 10）
-- 或增加 `sample_rate`（默认 10，改为 15，即减少采样帧数）
-- 关闭其他 GPU 程序
+**说明**：可将 `VLM_MAX_FRAMES` 从 8 降到 6 缩短推理时间，代价是减少分析帧数。
 
 ### Q3: 摄像头无法打开
 
-**原因**: 
-- 摄像头被其他程序占用
-- 或硬件未连接
+**解决**：关闭其他占用摄像头的程序（Teams、浏览器等）；或在 `.env` 中修改 `CAMERA_ID` / `CAMERA_BACKEND`
 
-**解决**:
-- 关闭其他视频程序（如 Teams、Chrome 摄像头等）
-- 检查设备管理器中摄像头是否正常
+### Q4: 下载失败（`HF_HUB_OFFLINE` 报错）
 
-### Q4: VLM 推理很慢（>20 秒）
+**原因**：环境变量中 `HF_HUB_OFFLINE=1` 阻止了网络访问
 
-**原因**: 正常行为（2B 模型在 RTX 4060 上）
+**解决**：`download_model.py` 已自动强制覆盖此开关，直接运行脚本即可，无需手动修改环境变量
 
-**说明**: 
-- 4-bit 量化 + 多帧推理约需 5-10 秒
-- 首次推理会多花 1-2 秒（模型编译）
+### Q5: ModelScope 下载后 `VLM_MODEL_NAME` 怎么填
 
-### Q4.1: 日志提示 `FlashAttention2 不可用`，Windows 不支持吗？
+下载完成后脚本会输出类似：
 
-**结论**:
-- `flash-attn` 在 Linux 上支持最完整，Windows 不是一等公民平台。
-- Windows 并非绝对不能用，但通常需要本地编译，安装复杂且兼容性要求严格（CUDA / PyTorch / 编译工具链版本需匹配）。
+```
+VLM_MODEL_NAME=C:\...\hf_cache\modelscope\Qwen--Qwen2-VL-7B-Instruct
+```
 
-**建议**:
-- 日常使用可直接接受自动回退到 `SDPA/Eager`（程序可正常运行）。
-- 若不想每次看到回退提示，可在 `.env` 中设置：`USE_FLASH_ATTENTION_2=0`。
-- 若必须稳定使用 FA2，建议迁移到 WSL2 / Linux 环境。
-
-### Q5: 结果显示不清楚/被遮挡
-
-**解决**:
-- 摄像头视角应包含全身（或至少关键关节）
-- 光线充足有利于 VLM 理解
+将该行复制到 `.env` 替换原有 `VLM_MODEL_NAME` 即可（本地路径，不是 HF model id）。
 
 ---
 
-## 🔧 调优参数
+## 🔧 主要配置项（`.env`）
 
-可在 `main.py` 的 `initialize_video_streamer()` 中修改：
-
-```python
-video_streamer = VideoStreamer(
-    camera_id=0,           # 摄像头 ID（如果多个摄像头，试 0, 1, 2...）
-    buffer_size=15,        # 缓冲帧数（↓ 减少显存，↑ 更多上下文）
-    sample_rate=10,        # 采样率（↑ 减少帧数，↓ 更高采样密度）
-    target_height=336,     # 缩放高度（↓ 显存更低，↑ 细节更多）
-    fps=30,                # 摄像头帧率
-)
-```
-
----
-
-## 🐛 调试模式
-
-如果需要更详细的日志：
-
-```python
-# 在 main.py 中修改
-vlm_model = FitnessVLM(..., verbose=True)  # 已启用
-video_streamer = VideoStreamer(..., verbose=True)  # 已启用
-```
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `VLM_MODEL_NAME` | — | 模型名称或本地路径 |
+| `VLM_MAX_FRAMES` | `8` | 发给 VLM 的最大帧数（均匀抽取） |
+| `VLM_MAX_TOKENS` | `256` | 生成最大 token 数 |
+| `TARGET_HEIGHT` | `336` | 短边缩放目标像素（横竖屏自适应） |
+| `SAMPLE_RATE` | `10` | 每 N 帧采 1 帧 |
+| `PRE_RECORD_DELAY` | `5.0` | 摄像头模式按 S 后的倒计时（秒） |
+| `RECORD_DURATION` | `10.0` | 摄像头模式录制时长（秒） |
+| `FEEDBACK_DURATION` | `4.0` | 结果在画面上显示时长（秒） |
+| `VLM_LOCAL_FILES_ONLY` | `1` | 离线模式（仅用本地缓存） |
+| `USE_FLASH_ATTENTION_2` | `True` | FlashAttention2（Windows 通常不可用，自动回退） |
 
 ---
 
 ## 📚 技术栈
 
-| 组件 | 版本 | 用途 |
-|------|------|------|
-| PyTorch | 2.0+ | 深度学习框架 |
-| Transformers | 4.37+ | HuggingFace 模型加载 |
-| BitsAndBytes | 0.41.3+ | 4-bit 量化 |
-| OpenCV | 4.8+ | 视频采集 |
-| Pillow | 10.0+ | 图像处理 |
-| Accelerate | 0.25+ | 推理加速 |
-
----
-
-## 📖 进阶用法
-
-### 自定义 System Prompt
-
-在 `main.py` 中修改 `SYSTEM_PROMPT`:
-
-```python
-SYSTEM_PROMPT = """你是一个...（自定义角色定义）"""
-```
-
-### 修改分析查询
-
-```python
-ANALYSIS_QUERY = "请分析...（自定义问题）"
-```
-
-### 批量分析模式
-
-```python
-# 连续按 S 多次，每次都会触发新的推理
-# 建议等待上一次推理完成后再按 S（UI 会提示）
-```
-
----
-
-## 🎯 预期效果
-
-**输入**: 15 帧连续视频（深蹲/硬拉）
-
-**输出示例**:
-```
-【问题】躯干过度前倾，腰部圆背风险
-【原因】髋关节灵活性不足，核心肌群激活不充分
-【修正】想象向后坐，保持脊柱中立，下蹲时挺胸
-```
-
----
-
-## 💡 提示
-
-1. **最佳实践**
-   - 每次动作完成后立即按 S（缓冲区最新数据最准）
-   - 光线充足，摄像头距离 1-3 米
-
-2. **显存管理**
-   - VLM 加载后占用 ~4.5GB（4-bit 量化）
-   - 单次推理最多额外占用 1-2GB（临时）
-   - 推理完成后自动释放
-
-3. **精度优化**
-   - 增加 `buffer_size` 获得更多上下文（但显存升高）
-   - 减少 `sample_rate` 增加采样密度（更细致分析）
+| 组件 | 用途 |
+|------|------|
+| PyTorch 2.x | 深度学习框架 |
+| Transformers 4.37+ | Qwen2-VL 模型加载 |
+| BitsAndBytes | 4-bit 量化 |
+| OpenCV | 视频采集与显示 |
+| Pillow | 图像处理 |
+| Accelerate | device_map 推理加速 |
+| ModelScope（可选） | 国内模型下载 |
 
 ---
 
 ## 📞 故障排查清单
 
-- [ ] Conda 环境已激活
-- [ ] PyTorch CUDA 版本正确 (`torch.cuda.is_available() == True`)
-- [ ] 所有依赖已安装 (`pip check` 无错误)
-- [ ] 摄像头硬件正常连接
-- [ ] 网络可访问 Hugging Face（模型下载）
-- [ ] GPU 显存足够 (8GB+)
-- [ ] 无其他 GPU 进程占用
+- [ ] Conda 环境已激活（`conda activate workout-coach`）
+- [ ] `torch.cuda.is_available()` 返回 `True`
+- [ ] `.env` 已创建且 `VLM_MODEL_NAME` / `HF_HOME` 填写正确
+- [ ] 模型文件完整（`hf_cache/` 下存在 safetensors 权重文件）
+- [ ] 无其他进程占用 GPU 显存
+- [ ] 摄像头模式下硬件已连接且未被占用
 
 ---
 
-## 🌐 GitHub 上传建议（已处理）
+## 🌐 GitHub 上传说明
 
-- 已移除本地模型与缓存目录（避免仓库过大）
-- 已添加 `.gitignore`，默认忽略 `.env`、`hf_cache/`、`__pycache__/` 等本地文件
-- 建议仅保留 `config.env.example` 作为配置模板
-- 不要提交 `.env`（可能包含本地路径、镜像端点或私有配置）
+`.gitignore` 已配置，以下内容不会被提交：
 
-### 作为实习项目的推荐描述
+- `.env`（含本地路径）
+- `hf_cache/`（模型权重，体积过大）
+- `input/`（本地视频文件）
+- `__pycache__/`
 
-> 在 8GB 显存受限场景下，完成 Qwen2-VL 端侧部署，设计异步视频推理链路，支持实时动作纠正反馈，兼顾性能、可用性与工程可维护性。
+仅保留 `config.env.example` 作为配置模板。
+
+### 项目描述建议
+
+> 在 8GB 显存受限场景下完成 Qwen2-VL-7B 端侧部署，设计双输入模式（摄像头/视频文件）的异步推理链路，支持任意健身动作的自动核验与实时纠正反馈。
 
 ---
 
 ## 📄 许可证
 
-本项目为教学/演示用途。
+本项目为教学 / 演示用途。
 
 ---
 

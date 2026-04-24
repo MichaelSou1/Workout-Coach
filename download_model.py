@@ -1,9 +1,16 @@
 """
-离线模型下载脚本（支持中国大陆镜像）
+离线模型下载脚本（支持 Hugging Face 镜像 / 魔搭社区 ModelScope）
 
 用途：
-1) 预下载 Qwen2-VL-2B-Instruct 到本地缓存
+1) 预下载 Qwen2-VL 系列模型到本地缓存
 2) 后续可在离线模式启动 main.py
+
+常用命令：
+  # HuggingFace 镜像（hf-mirror.com）
+  python download_model.py --model Qwen/Qwen2-VL-7B-Instruct
+
+  # 魔搭社区（ModelScope，国内速度更快）
+  python download_model.py --model Qwen/Qwen2-VL-7B-Instruct --source modelscope
 """
 
 import argparse
@@ -29,11 +36,17 @@ def _is_win_symlink_privilege_error(err: Exception) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download VLM model for offline startup")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Hugging Face model id")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model id (HuggingFace or ModelScope)")
     parser.add_argument(
         "--cache-dir",
         default=str(Path("./hf_cache").resolve()),
-        help="Model cache directory (HF_HOME)",
+        help="Model cache directory",
+    )
+    parser.add_argument(
+        "--source",
+        choices=["huggingface", "modelscope"],
+        default="huggingface",
+        help="Download source: huggingface (default) or modelscope",
     )
     parser.add_argument(
         "--endpoint",
@@ -63,6 +76,10 @@ def main() -> int:
     # 配置缓存目录（transformers/huggingface_hub 通用）
     os.environ["HF_HOME"] = str(cache_dir)
 
+    # 下载脚本必须在线，强制覆盖离线开关
+    os.environ["HF_HUB_OFFLINE"] = "0"
+    os.environ["HF_DATASETS_OFFLINE"] = "0"
+
     # 关闭 hf_transfer，网络不稳定环境更稳
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
     # 仅关闭告警，不影响实际下载逻辑
@@ -72,8 +89,58 @@ def main() -> int:
         os.environ["HF_ENDPOINT"] = args.endpoint
         os.environ["HUGGINGFACE_HUB_ENDPOINT"] = args.endpoint
 
+    if args.source == "modelscope":
+        return _download_modelscope(args, cache_dir)
+    else:
+        return _download_huggingface(args, cache_dir)
+
+
+def _download_modelscope(args, cache_dir: Path) -> int:
+    """使用魔搭社区（ModelScope）下载模型。"""
+    try:
+        from modelscope import snapshot_download as ms_snapshot_download
+    except ImportError:
+        print("[download_model] ❌ 未安装 modelscope，请先运行：")
+        print("    pip install modelscope")
+        return 1
+
+    local_dir = cache_dir / "modelscope" / args.model.replace("/", "--")
+    local_dir.mkdir(parents=True, exist_ok=True)
+
     print("=" * 78)
-    print("[download_model] 开始下载模型")
+    print("[download_model] 开始下载模型（魔搭社区 ModelScope）")
+    print(f"[download_model] model        : {args.model}")
+    print(f"[download_model] local_dir    : {local_dir}")
+    print("=" * 78)
+
+    try:
+        snapshot_path = ms_snapshot_download(
+            model_id=args.model,
+            local_dir=str(local_dir),
+        )
+    except Exception as e:
+        print(f"[download_model] ❌ ModelScope 下载失败: {e}")
+        return 1
+
+    print("\n[download_model] ✅ 下载完成")
+    print(f"[download_model] local path   : {snapshot_path}")
+    print("\n[download_model] 请将以下配置写入 .env：")
+    print(f"VLM_MODEL_NAME={snapshot_path}")
+    print("VLM_LOCAL_FILES_ONLY=1")
+    print("HF_HUB_OFFLINE=1")
+    print("HF_DATASETS_OFFLINE=1")
+    print("\n[download_model] 然后运行: python main.py")
+    return 0
+
+
+def _download_huggingface(args, cache_dir: Path) -> int:
+    """使用 Hugging Face（含镜像）下载模型。"""
+    if not args.no_mirror and args.endpoint:
+        os.environ["HF_ENDPOINT"] = args.endpoint
+        os.environ["HUGGINGFACE_HUB_ENDPOINT"] = args.endpoint
+
+    print("=" * 78)
+    print("[download_model] 开始下载模型（Hugging Face）")
     print(f"[download_model] model        : {args.model}")
     print(f"[download_model] cache_dir    : {cache_dir}")
     print(f"[download_model] endpoint     : {os.getenv('HF_ENDPOINT', 'https://huggingface.co')}")
@@ -109,7 +176,6 @@ def main() -> int:
                     endpoint=endpoint,
                 )
             except TypeError:
-                # 兼容未来版本参数变更
                 snapshot_path = snapshot_download(
                     repo_id=args.model,
                     local_dir=str(local_model_dir),
@@ -123,13 +189,7 @@ def main() -> int:
 
             print("\n[download_model] ✅ 无符号链接模式下载完成")
             print(f"[download_model] local model  : {local_model_dir}")
-            print("\n[download_model] 建议离线启动配置（写入 .env）：")
-            print(f"VLM_MODEL_NAME={local_model_dir}")
-            print(f"HF_HOME={cache_dir}")
-            print("VLM_LOCAL_FILES_ONLY=1")
-            print("HF_HUB_OFFLINE=1")
-            print("HF_DATASETS_OFFLINE=1")
-            print("\n[download_model] 然后运行: python main.py")
+            _print_hf_env(args.model, cache_dir, local_model_dir)
             return 0
 
         print(f"[download_model] ❌ 下载失败: {e}")
@@ -137,16 +197,18 @@ def main() -> int:
 
     print("\n[download_model] ✅ 下载完成")
     print(f"[download_model] snapshot path: {snapshot_path}")
+    _print_hf_env(args.model, cache_dir)
+    return 0
 
-    print("\n[download_model] 建议离线启动配置（写入 .env）：")
-    print(f"VLM_MODEL_NAME={args.model}")
+
+def _print_hf_env(model: str, cache_dir: Path, local_model_dir: Path = None):
+    print("\n[download_model] 请将以下配置写入 .env：")
+    print(f"VLM_MODEL_NAME={local_model_dir if local_model_dir else model}")
     print(f"HF_HOME={cache_dir}")
     print("VLM_LOCAL_FILES_ONLY=1")
     print("HF_HUB_OFFLINE=1")
     print("HF_DATASETS_OFFLINE=1")
-
     print("\n[download_model] 然后运行: python main.py")
-    return 0
 
 
 if __name__ == "__main__":

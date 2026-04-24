@@ -19,14 +19,14 @@ logger = logging.getLogger(__name__)
 class VideoStreamer:
     """
     多线程视频流采样和缓存管理器。
-    
+
     核心功能：
-    - 实时捕获摄像头视频
+    - 实时捕获摄像头视频，或从本地视频文件读取
     - 维护固定长度的帧缓存队列（降低显存压力）
     - 监听键盘事件（按 'S' 触发分析）
     - 不阻塞主画面显示循环
     """
-    
+
     def __init__(
         self,
         camera_id: int = 0,
@@ -38,20 +38,22 @@ class VideoStreamer:
         pre_record_delay: float = 5.0,
         record_duration: float = 10.0,
         verbose: bool = True,
+        file_path: Optional[str] = None,
     ):
         """
         初始化视频流处理器。
-        
+
         Args:
-            camera_id: 摄像头 ID（0 为默认前置摄像头）
+            camera_id: 摄像头 ID（0 为默认前置摄像头），file_path 存在时忽略
             buffer_size: 帧缓存队列的最大长度
             sample_rate: 每多少帧采样一次（如 10 表示每 10 帧采 1 帧）
             target_height: 缩放后图像的目标高度（像素），降低推理显存压力
-            fps: 摄像头帧率目标
+            fps: 摄像头帧率目标（文件模式下忽略，使用文件自身 FPS）
             camera_backend: 摄像头后端（auto/dshow/msmf/ffmpeg/gstreamer）
-            pre_record_delay: 按下 S 后开始录制前的倒计时秒数
-            record_duration: 实际录制时长（秒）
+            pre_record_delay: 按下 S 后开始录制前的倒计时秒数（仅摄像头模式）
+            record_duration: 实际录制时长（秒）（仅摄像头模式）
             verbose: 是否输出详细日志
+            file_path: 本地视频文件路径（mp4/avi/mov/mkv 等），若提供则切换为文件模式
         """
         self.camera_id = camera_id
         self.buffer_size = buffer_size
@@ -62,7 +64,9 @@ class VideoStreamer:
         self.pre_record_delay = pre_record_delay
         self.record_duration = record_duration
         self.verbose = verbose
-        
+        self.file_path = file_path
+        self.is_file_mode = bool(file_path)
+
         # 视频流状态
         self.cap = None
         self.is_running = False
@@ -72,36 +76,60 @@ class VideoStreamer:
         self.last_read_fail_warn_time = 0.0
         self.read_fail_warn_interval = float(os.getenv("CAMERA_READ_FAIL_WARN_INTERVAL", "1.0"))
 
-        # 定时录制状态
+        # 定时录制状态（仅摄像头模式使用）
         self.record_state = "idle"  # idle | countdown | recording
         self.countdown_end_time = 0.0
         self.recording_end_time = 0.0
         self.recorded_frames: List[np.ndarray] = []
-        
+
+        # 文件模式：全量采样帧存储
+        self._file_sampled_frames: List[np.ndarray] = []
+        self._file_eof = False  # 文件播放结束标志
+
         # 事件标志
         self.stop_event = Event()
         self.analysis_triggered = Event()
-        
+
         # 回调函数
         self.on_analysis_trigger: Optional[Callable[[List[Image.Image], str], None]] = None
 
-        # 动作类型状态（手动选择）
-        self.current_action_type = "squat"  # squat | deadlift | bench_press
-        self.action_type_labels = {
-            "squat": "深蹲",
-            "deadlift": "硬拉",
-            "bench_press": "卧推",
-        }
-        
+        # 动作类型状态（用户输入的原始动作名称）
+        self.current_action_type = "深蹲"
+
         # 用户界面反馈
         self.feedback_text = ""
         self.feedback_time = 0.0
         self.feedback_duration = 3.0  # 显示 3 秒
-        
+
         if verbose:
             logger.setLevel(logging.DEBUG)
-        
-        self._initialize_camera()
+
+        if self.is_file_mode:
+            self._initialize_file()
+        else:
+            self._initialize_camera()
+
+    def _initialize_file(self):
+        """初始化本地视频文件源。"""
+        logger.info(f"[Video] 打开视频文件: {self.file_path}")
+        if not os.path.isfile(self.file_path):
+            raise FileNotFoundError(f"视频文件不存在: {self.file_path}")
+
+        cap = cv2.VideoCapture(self.file_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"无法打开视频文件: {self.file_path}")
+
+        self.cap = cap
+        width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        file_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / file_fps if file_fps > 0 else 0
+        self._file_native_fps = file_fps
+        logger.info(
+            f"[Video] ✓ 视频文件已加载 - {width}x{height} @ {file_fps:.1f} FPS"
+            f"  共 {total_frames} 帧 ({duration:.1f} 秒)"
+        )
 
     def _resolve_backend_candidates(self) -> List[int]:
         """根据配置与平台生成后端候选列表。"""
@@ -186,22 +214,15 @@ class VideoStreamer:
         raise RuntimeError(msg)
     
     def _resize_frame(self, frame: np.ndarray) -> np.ndarray:
-        """
-        按照目标高度缩放图像，保持宽高比。
-        
-        Args:
-            frame: OpenCV 图像数组
-        
-        Returns:
-            缩放后的图像
-        """
+        """按短边缩放图像，保持宽高比，横竖屏均适用。"""
         h, w = frame.shape[:2]
-        if h == self.target_height:
+        short = min(h, w)
+        if short == self.target_height:
             return frame
-        
-        scale = self.target_height / h
+        scale = self.target_height / short
         new_w = int(w * scale)
-        return cv2.resize(frame, (new_w, self.target_height), interpolation=cv2.INTER_LINEAR)
+        new_h = int(h * scale)
+        return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     
     def _frame_to_pil(self, frame: np.ndarray) -> Image.Image:
         """
@@ -221,11 +242,18 @@ class VideoStreamer:
         后台循环：捕获、采样、缓存视频帧。
         在独立线程中运行，不阻塞主显示循环。
         """
-        logger.info("[Video] 帧捕获循环启动...")
-        
+        if self.is_file_mode:
+            self._capture_loop_file()
+        else:
+            self._capture_loop_camera()
+
+    def _capture_loop_camera(self):
+        """摄像头模式的帧捕获循环。"""
+        logger.info("[Video] 帧捕获循环启动（摄像头模式）...")
+
         while not self.stop_event.is_set():
             ret, frame = self.cap.read()
-            
+
             if not ret:
                 now = time.time()
                 if now - self.last_read_fail_warn_time >= self.read_fail_warn_interval:
@@ -233,23 +261,54 @@ class VideoStreamer:
                     self.last_read_fail_warn_time = now
                 time.sleep(0.03)
                 continue
-            
+
             # 采样：每 sample_rate 帧采 1 帧
             self.frame_count += 1
             if self.frame_count % self.sample_rate != 0:
                 continue
-            
-            # 缩放帧
+
             resized_frame = self._resize_frame(frame)
-            
-            # 添加到缓冲区
+
             with self.frame_lock:
                 self.frame_buffer.append(resized_frame)
 
-            # 处理定时录制状态机
             self._recording_state_step(resized_frame)
-        
-        logger.info("[Video] 帧捕获循环停止")
+
+        logger.info("[Video] 帧捕获循环停止（摄像头模式）")
+
+    def _capture_loop_file(self):
+        """文件模式的帧捕获循环：按视频原始 FPS 逐帧送入缓冲区，并采样存储所有帧。"""
+        logger.info("[Video] 帧捕获循环启动（文件模式）...")
+        frame_interval = 1.0 / max(self._file_native_fps, 1.0)
+
+        while not self.stop_event.is_set():
+            t0 = time.time()
+            ret, frame = self.cap.read()
+
+            if not ret:
+                # 文件播放结束
+                logger.info("[Video] 视频文件播放完毕")
+                self._file_eof = True
+                break
+
+            self.frame_count += 1
+            resized_frame = self._resize_frame(frame)
+
+            # 更新显示缓冲区（取最新帧用于预览）
+            with self.frame_lock:
+                self.frame_buffer.append(resized_frame)
+
+            # 按 sample_rate 采样存储，供 VLM 分析
+            if self.frame_count % self.sample_rate == 0:
+                self._file_sampled_frames.append(resized_frame.copy())
+
+            # 按原始 FPS 节奏播放
+            elapsed = time.time() - t0
+            sleep_time = frame_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+        logger.info("[Video] 帧捕获循环停止（文件模式）")
     
     def _display_loop(self):
         """
@@ -257,20 +316,25 @@ class VideoStreamer:
         运行在主线程，响应用户交互。
         """
         logger.info("[Video] 显示循环启动...")
-        logger.info("[Video] 快捷键: 按 'S' 触发分析 | 按 'Q' 退出")
-        
-        frame_idx = 0
-        
+        if self.is_file_mode:
+            logger.info("[Video] 快捷键: 按 'S' 立即触发分析 | 按 'Q' 退出（视频结束时自动触发分析）")
+        else:
+            logger.info("[Video] 快捷键: 按 'S' 触发分析 | 按 'Q' 退出")
+
+        window_title = "Fitness Coach - File Playback" if self.is_file_mode else "Fitness Coach - Video Stream"
+
         while not self.stop_event.is_set():
+            # 文件模式：检测播放结束后自动触发分析
+            if self.is_file_mode and self._file_eof and not self.analysis_triggered.is_set():
+                self._trigger_file_analysis()
+
             with self.frame_lock:
                 if len(self.frame_buffer) == 0:
                     time.sleep(0.01)
                     continue
-                
-                # 显示缓冲区中最新的一帧
                 display_frame = self.frame_buffer[-1].copy()
-            
-            # 在画面上绘制反馈文本（如果存在）
+
+            # 在画面上绘制反馈文本
             if self.feedback_text and time.time() - self.feedback_time < self.feedback_duration:
                 cv2.putText(
                     display_frame,
@@ -278,37 +342,65 @@ class VideoStreamer:
                     (10, 40),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (0, 255, 0),  # 绿色
+                    (0, 255, 0),
                     2,
                     cv2.LINE_AA,
                 )
 
-            # 显示定时录制状态
-            now = time.time()
-            if self.record_state == "countdown":
-                left = max(0.0, self.countdown_end_time - now)
-                status_text = f"倒计时: {left:.1f}s 后开始录制"
-                color = (0, 255, 255)
-            elif self.record_state == "recording":
-                left = max(0.0, self.recording_end_time - now)
-                status_text = f"录制中: 剩余 {left:.1f}s"
-                color = (0, 165, 255)
-            else:
-                status_text = ""
-                color = (255, 255, 255)
+            # 摄像头模式：显示录制倒计时/录制状态
+            if not self.is_file_mode:
+                now = time.time()
+                if self.record_state == "countdown":
+                    left = max(0.0, self.countdown_end_time - now)
+                    status_text = f"倒计时: {left:.1f}s 后开始录制"
+                    color = (0, 255, 255)
+                elif self.record_state == "recording":
+                    left = max(0.0, self.recording_end_time - now)
+                    status_text = f"录制中: 剩余 {left:.1f}s"
+                    color = (0, 165, 255)
+                else:
+                    status_text = ""
+                    color = (255, 255, 255)
 
-            if status_text:
+                if status_text:
+                    cv2.putText(
+                        display_frame,
+                        status_text,
+                        (10, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        color,
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+            # 文件模式：显示文件名和已采样帧数
+            if self.is_file_mode:
+                file_name = os.path.basename(self.file_path)
+                sampled_count = len(self._file_sampled_frames)
+                file_info = f"文件: {file_name}  已采样: {sampled_count} 帧"
                 cv2.putText(
                     display_frame,
-                    status_text,
+                    file_info,
                     (10, 70),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    color,
-                    2,
+                    0.5,
+                    (255, 220, 100),
+                    1,
                     cv2.LINE_AA,
                 )
-            
+                if self._file_eof:
+                    cv2.putText(
+                        display_frame,
+                        "播放结束，分析中...",
+                        (10, 95),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (0, 165, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
             # 显示缓冲区状态
             buffer_status = f"缓冲帧: {len(self.frame_buffer)}/{self.buffer_size}"
             cv2.putText(
@@ -317,14 +409,13 @@ class VideoStreamer:
                 (10, display_frame.shape[0] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                (200, 200, 200),  # 浅灰
+                (200, 200, 200),
                 1,
                 cv2.LINE_AA,
             )
 
             # 显示当前动作类型
-            action_label = self.action_type_labels.get(self.current_action_type, self.current_action_type)
-            action_status = f"动作类型: {action_label}"
+            action_status = f"动作类型: {self.current_action_type}"
             cv2.putText(
                 display_frame,
                 action_status,
@@ -335,13 +426,11 @@ class VideoStreamer:
                 1,
                 cv2.LINE_AA,
             )
-            
-            # 显示窗口
-            cv2.imshow("Fitness Coach - Video Stream", display_frame)
-            
-            # 处理键盘事件（非阻塞）
+
+            cv2.imshow(window_title, display_frame)
+
             key = cv2.waitKey(1) & 0xFF
-            
+
             if key == ord('q') or key == ord('Q'):
                 logger.info("[Video] 用户按下 'Q'，准备退出...")
                 self.stop()
@@ -349,10 +438,11 @@ class VideoStreamer:
 
             elif key == ord('s') or key == ord('S'):
                 logger.info("[Video] 用户按下 'S'，触发分析...")
-                self._trigger_analysis()
-            
-            frame_idx += 1
-        
+                if self.is_file_mode:
+                    self._trigger_file_analysis()
+                else:
+                    self._trigger_analysis()
+
         cv2.destroyAllWindows()
         logger.info("[Video] 显示循环停止")
     
@@ -377,6 +467,30 @@ class VideoStreamer:
 
         logger.info(f"[Video] 将在 {self.pre_record_delay:.1f} 秒后开始录制，录制时长 {self.record_duration:.1f} 秒")
         self.set_feedback(f"{self.pre_record_delay:.0f}秒后开始录制", duration=min(self.pre_record_delay, 3.0))
+
+    def _trigger_file_analysis(self):
+        """文件模式：将所有采样帧发送给 VLM 进行分析（仅触发一次）。"""
+        if self.analysis_triggered.is_set():
+            logger.warning("[Video] 文件分析已触发过，忽略重复请求")
+            return
+
+        frames_np = self._file_sampled_frames
+        if not frames_np:
+            logger.warning("[Video] 文件模式：没有采样到有效帧，无法分析")
+            self.set_feedback("未采到有效帧，无法分析", duration=3.0)
+            return
+
+        self.analysis_triggered.set()
+        frames_pil = [self._frame_to_pil(f) for f in frames_np]
+        logger.info(f"[Video] 文件模式：发送 {len(frames_pil)} 帧给 VLM 推理...")
+
+        if self.on_analysis_trigger:
+            try:
+                self.on_analysis_trigger(frames_pil, self.current_action_type)
+                logger.info("[Video] ✓ 文件分析请求已提交")
+            except Exception as e:
+                logger.error(f"[Video] 文件分析触发失败: {e}")
+                self.set_feedback(f"分析失败: {str(e)[:30]}")
 
     def _recording_state_step(self, sampled_frame: np.ndarray):
         """在采样循环中推进定时录制状态机。"""
@@ -406,7 +520,7 @@ class VideoStreamer:
 
                 frames_to_analyze = [self._frame_to_pil(frame) for frame in frames_np]
                 logger.info(f"[Video] 录制完成，发送 {len(frames_to_analyze)} 帧给 VLM 推理...")
-                logger.info(f"[Video] 当前动作类型: {self.action_type_labels.get(self.current_action_type, self.current_action_type)}")
+                logger.info(f"[Video] 当前动作类型: {self.current_action_type}")
 
                 if self.on_analysis_trigger:
                     try:

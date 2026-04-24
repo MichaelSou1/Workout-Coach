@@ -10,7 +10,7 @@ from typing import List
 
 from PIL import Image
 
-from action_profiles import build_prompts, get_action_profile
+from action_profiles import build_prompts
 from vlm_inference import FitnessVLM
 from video_streamer import VideoStreamer
 
@@ -91,41 +91,36 @@ is_analyzing = False
 # ============================================================================
 
 def on_vlm_result(result_text: str):
-    """
-    VLM 推理完成后的回调函数。
-    将建议显示在视频画面上。
-    
-    Args:
-        result_text: VLM 生成的文本建议
-    """
+    """VLM 推理完成后的回调函数，将摘要显示在视频画面上。"""
     global is_analyzing, video_streamer
-    
+
     logger.info(f"[Main] VLM 返回结果:\n{result_text}")
-    
-    # 在视频画面上显示反馈（提取关键信息）
+
     feedback_duration = _env_float("FEEDBACK_DURATION", 4.0)
     if video_streamer:
-        # 简化显示：取前 50 字符
-        display_text = result_text[:50] if result_text else "分析中..."
+        display_text = result_text[:50] if result_text else "分析完成"
+
+        # 优先显示总体结论；若有画面动作与声称不符则一并显示
         if "【总体结论】" in result_text:
-            # 提取总体结论
             try:
-                summary_start = result_text.index("【总体结论】") + len("【总体结论】")
-                summary_end = result_text.index("【关键问题1】") if "【关键问题1】" in result_text else len(result_text)
-                display_text = result_text[summary_start:summary_end].strip()[:45]
+                start = result_text.index("【总体结论】") + len("【总体结论】")
+                end = result_text.index("【关键问题1】") if "【关键问题1】" in result_text else len(result_text)
+                display_text = result_text[start:end].strip()[:45]
             except Exception:
                 pass
-        elif "【问题】" in result_text:
-            # 兼容旧格式：提取问题部分
+        if "【画面动作】" in result_text:
             try:
-                problem_start = result_text.index("【问题】") + len("【问题】")
-                problem_end = result_text.index("【原因】") if "【原因】" in result_text else len(result_text)
-                display_text = result_text[problem_start:problem_end].strip()[:45]
+                start = result_text.index("【画面动作】") + len("【画面动作】")
+                end = result_text.index("【总体结论】") if "【总体结论】" in result_text else len(result_text)
+                action_line = result_text[start:end].strip()
+                # 只有当动作行包含括号说明（即不符时）才加入显示
+                if "（" in action_line:
+                    display_text = action_line[:40] + " | " + display_text[:20]
             except Exception:
                 pass
-        
+
         video_streamer.set_feedback(display_text, duration=feedback_duration)
-    
+
     is_analyzing = False
 
 
@@ -144,22 +139,26 @@ def on_analysis_request(frames: List[Image.Image], action_type: str):
         logger.warning("[Main] 已有分析在进行中，忽略此请求")
         video_streamer.set_feedback("分析中，请稍候...", duration=1.0)
         return
-    
+
     if not vlm_model:
         logger.error("[Main] VLM 模型未初始化")
         video_streamer.set_feedback("模型未就绪，请检查", duration=2.0)
         return
-    
+
     is_analyzing = True
-    profile = get_action_profile(action_type)
     system_prompt, user_query = build_prompts(action_type)
 
-    logger.info(f"[Main] 开始异步推理 {len(frames)} 帧，动作类型: {profile.label}")
-    video_streamer.set_feedback(f"分析中: {profile.label}", duration=2.0)
-    
+    # 均匀抽帧，避免帧数过多导致 2B 模型注意力分散
+    max_frames = _env_int("VLM_MAX_FRAMES", 8)
+    if len(frames) > max_frames:
+        step = len(frames) / max_frames
+        frames = [frames[int(i * step)] for i in range(max_frames)]
+
+    logger.info(f"[Main] 开始异步推理 {len(frames)} 帧，动作类型: {action_type}")
+    video_streamer.set_feedback(f"分析中: {action_type}", duration=2.0)
+
     max_new_tokens = _env_int("VLM_MAX_TOKENS", 256)
 
-    # 异步推理
     vlm_model.analyze_fitness_frames_async(
         frames=frames,
         system_prompt=system_prompt,
@@ -216,12 +215,66 @@ def initialize_vlm():
         return False
 
 
-def initialize_video_streamer():
-    """初始化视频流处理模块。"""
+_INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input")
+_VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".flv", ".wmv", ".webm"}
+
+
+def _scan_input_dir() -> List[str]:
+    """扫描 input/ 目录，返回所有视频文件的完整路径列表（按文件名排序）。"""
+    if not os.path.isdir(_INPUT_DIR):
+        return []
+    files = [
+        os.path.join(_INPUT_DIR, f)
+        for f in sorted(os.listdir(_INPUT_DIR))
+        if os.path.splitext(f)[1].lower() in _VIDEO_EXTS
+    ]
+    return files
+
+
+def _select_input_source() -> str:
+    """扫描 input/ 文件夹，让用户选择视频文件或摄像头。返回文件路径（摄像头返回空字符串）。"""
+    logger.info("[Main] ========== 选择视频输入源 ==========")
+    logger.info(f"[Main] 扫描目录: {_INPUT_DIR}")
+
+    video_files = _scan_input_dir()
+
+    if not video_files:
+        logger.info("[Main] input/ 目录为空，自动使用摄像头")
+        logger.info(f"[Main] 提示：将视频文件放入 {_INPUT_DIR} 即可使用文件模式")
+        return ""
+
+    # 列出所有文件供用户选择
+    logger.info(f"[Main] 发现 {len(video_files)} 个视频文件:")
+    for i, path in enumerate(video_files, 1):
+        size_mb = os.path.getsize(path) / 1024 / 1024
+        logger.info(f"  [{i}] {os.path.basename(path)}  ({size_mb:.1f} MB)")
+    logger.info(f"  [0] 摄像头实时拍摄")
+
+    while True:
+        try:
+            choice = input(f"请选择 [0-{len(video_files)}]（直接回车使用摄像头）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            logger.info("\n[Main] 使用默认：摄像头")
+            return ""
+
+        if choice == "" or choice == "0":
+            logger.info("[Main] 已选择：摄像头")
+            return ""
+
+        if choice.isdigit() and 1 <= int(choice) <= len(video_files):
+            selected = video_files[int(choice) - 1]
+            logger.info(f"[Main] 已选择文件: {os.path.basename(selected)}")
+            return selected
+
+        logger.warning(f"[Main] 请输入 0 到 {len(video_files)} 之间的数字")
+
+
+def initialize_video_streamer(file_path: str = ""):
+    """初始化视频流处理模块。file_path 非空时使用文件模式。"""
     global video_streamer
-    
+
     logger.info("[Main] ========== 初始化视频流 ==========")
-    
+
     try:
         camera_id = _env_int("CAMERA_ID", 0)
         camera_backend = os.getenv("CAMERA_BACKEND", "auto")
@@ -243,17 +296,20 @@ def initialize_video_streamer():
             pre_record_delay=pre_record_delay,
             record_duration=record_duration,
             verbose=verbose,
+            file_path=file_path or None,
         )
-        
+
         # 绑定回调函数
         video_streamer.on_analysis_trigger = on_analysis_request
-        
-        logger.info("[Main] ✓ 视频流初始化完成")
+
+        mode = f"文件模式: {file_path}" if file_path else "摄像头模式"
+        logger.info(f"[Main] ✓ 视频流初始化完成（{mode}）")
         return True
-    
+
     except Exception as e:
         logger.error(f"[Main] ❌ 视频流初始化失败: {e}")
-        logger.error("[Main] 请检查摄像头是否连接并可用")
+        if not file_path:
+            logger.error("[Main] 请检查摄像头是否连接并可用")
         return False
 
 
@@ -283,27 +339,21 @@ def cleanup():
 
 
 def _select_action_from_cli() -> str:
-    """通过 CLI 交互让用户输入动作名称。"""
-    logger.info("[Main] 请选择本轮分析动作（支持自定义，例如：哑铃飞鸟）")
-    logger.info("[Main] 直接回车使用默认动作：深蹲")
+    """通过 CLI 交互让用户输入动作名称，支持任意动作。"""
+    logger.info("[Main] 请输入本轮要做的动作名称（任意动作均可）")
+    logger.info("[Main] 直接回车使用默认：深蹲")
 
-    while True:
-        try:
-            user_input = input("请输入动作名称（示例：深蹲/硬拉/卧推/哑铃飞鸟）: ").strip()
-        except EOFError:
-            user_input = ""
-        except KeyboardInterrupt:
-            logger.info("\n[Main] 已取消输入，使用默认动作：深蹲")
-            return "squat"
+    try:
+        user_input = input("请输入动作名称（例如：深蹲 / 硬拉 / 哑铃飞鸟 / 引体向上）: ").strip()
+    except EOFError:
+        user_input = ""
+    except KeyboardInterrupt:
+        logger.info("\n[Main] 已取消输入，使用默认：深蹲")
+        return "深蹲"
 
-        if not user_input:
-            profile = get_action_profile("squat")
-            logger.info(f"[Main] 使用默认动作：{profile.label}")
-            return profile.label
-
-        profile = get_action_profile(user_input)
-        logger.info(f"[Main] 已选择动作：{profile.label}")
-        return profile.label
+    action = user_input if user_input else "深蹲"
+    logger.info(f"[Main] 已选择动作：{action}")
+    return action
 
 
 # ============================================================================
@@ -334,8 +384,11 @@ def main():
     
     logger.info("")
     
+    # 选择视频输入源
+    input_file = _select_input_source()
+
     # 初始化视频流
-    if not initialize_video_streamer():
+    if not initialize_video_streamer(file_path=input_file):
         logger.error("[Main] 视频流初始化失败，程序退出")
         cleanup()
         return 1
@@ -343,21 +396,32 @@ def main():
     selected_action = _select_action_from_cli()
     video_streamer.current_action_type = selected_action
     video_streamer.set_feedback(f"动作类型: {selected_action}", duration=2.0)
-    
+
     logger.info("")
     logger.info("=" * 70)
-    logger.info("[Main] ✓ 系统就绪！开始视频直播...")
+    if input_file:
+        logger.info("[Main] ✓ 系统就绪！开始文件回放...")
+    else:
+        logger.info("[Main] ✓ 系统就绪！开始视频直播...")
     logger.info("=" * 70)
     logger.info("")
     logger.info("【快捷键说明】")
-    logger.info(f"  - 按 'S' 键: 先倒计时 {pre_record_delay:.1f} 秒，再录制 {record_duration:.1f} 秒并触发分析")
+    if input_file:
+        logger.info("  - 按 'S' 键: 立即触发分析（使用已播放部分的采样帧）")
+        logger.info("  - 文件播放结束时自动触发分析")
+    else:
+        logger.info(f"  - 按 'S' 键: 先倒计时 {pre_record_delay:.1f} 秒，再录制 {record_duration:.1f} 秒并触发分析")
     logger.info("  - 按 'Q' 键: 退出程序")
     logger.info("")
     logger.info("【使用流程】")
     logger.info(f"  1. 已通过 CLI 选择动作类型：{selected_action}")
-    logger.info(f"  2. 按 'S' 后有 {pre_record_delay:.1f} 秒倒计时（走位准备）")
-    logger.info(f"  3. 系统自动录制 {record_duration:.1f} 秒动作并发送给 VLM")
-    logger.info(f"  4. 建议将显示在视频画面上（{feedback_duration:.1f} 秒）")
+    if input_file:
+        logger.info(f"  2. 视频文件将自动播放，结束后发送采样帧给 VLM")
+        logger.info(f"  3. 分析建议将显示在画面上（{feedback_duration:.1f} 秒）")
+    else:
+        logger.info(f"  2. 按 'S' 后有 {pre_record_delay:.1f} 秒倒计时（走位准备）")
+        logger.info(f"  3. 系统自动录制 {record_duration:.1f} 秒动作并发送给 VLM")
+        logger.info(f"  4. 建议将显示在视频画面上（{feedback_duration:.1f} 秒）")
     logger.info("")
     
     try:

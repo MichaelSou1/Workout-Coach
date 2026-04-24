@@ -110,6 +110,7 @@ class FitnessVLM:
                 "trust_remote_code": True,
                 "local_files_only": self.local_files_only,
                 "cache_dir": self.cache_dir,
+                "low_cpu_mem_usage": True,  # 权重先在 CPU 处理再搬 GPU，消除加载峰值
             }
 
             if self.use_flash_attention_2:
@@ -182,28 +183,11 @@ class FitnessVLM:
             try:
                 self._clear_cache()
                 
-                # 构建多模态 prompt
-                # 格式：对于每一帧插入 <image> 标记
-                detailed_feedback = os.getenv("VLM_DETAILED_FEEDBACK", "1").strip().lower() in {"1", "true", "yes", "y", "on"}
-                strict_output_hint = (
-                    "请严格按如下格式输出，且只输出中文文本：\n"
-                    "【动作】...\n"
-                    + (
-                        "【总体结论】...\n【关键问题1】问题：...；原因：...；修正：...\n"
-                        "【关键问题2】问题：...；原因：...；修正：...\n"
-                        "【关键问题3】问题：...；原因：...；修正：...\n"
-                        "【下一组执行口令】1)... 2)... 3)...\n"
-                        if detailed_feedback
-                        else "【问题】...\n【原因】...\n【修正】...\n"
-                    )
-                    + "禁止输出坐标、框点、JSON、英文标签或多余说明。"
-                )
-
                 do_sample = os.getenv("VLM_DO_SAMPLE", "1").strip().lower() in {"1", "true", "yes", "y", "on"}
                 temperature = float(os.getenv("VLM_TEMPERATURE", "0.6"))
                 top_p = float(os.getenv("VLM_TOP_P", "0.9"))
                 repetition_penalty = float(os.getenv("VLM_REPETITION_PENALTY", "1.05"))
-                
+
                 messages = [
                     {
                         "role": "system",
@@ -213,7 +197,7 @@ class FitnessVLM:
                         "role": "user",
                         "content": [
                             {"type": "image", "image": frame} for frame in frames
-                        ] + [{"type": "text", "text": f"{user_query}\n\n{strict_output_hint}"}],
+                        ] + [{"type": "text", "text": user_query}],
                     }
                 ]
                 

@@ -1,275 +1,196 @@
-# 🏋️ Workout Coach（VLM 健身动作纠正）
+# Workout Coach — Qwen2-VL 健身动作质量评估
 
-> 基于 **Qwen2-VL-7B-Instruct** 的本地端侧多模态项目：支持摄像头实时采集或本地视频文件输入，异步推理动作问题，并将反馈叠加到画面中。
+> 基于 **Qwen2-VL-7B-Instruct** 的端到端健身动作质量评估系统。
+> 训练端覆盖 Fitness-AQA 数据解析、LoRA SFT 与 GRPO 奖励对齐全流程；
+> 推理端支持摄像头 / 本地视频文件输入，实时输出结构化纠错建议。
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-red)
-![Transformers](https://img.shields.io/badge/Transformers-4.37+-yellow)
-![Platform](https://img.shields.io/badge/Platform-Windows%2011-lightgrey)
-![GPU](https://img.shields.io/badge/GPU-RTX%204060%208GB-green)
+![Transformers](https://img.shields.io/badge/Transformers-5.x-yellow)
+![Train](https://img.shields.io/badge/Train-A100%2080GB%20BF16-purple)
+![Infer](https://img.shields.io/badge/Infer-RTX%204060%208GB-green)
+
+---
 
 ## 项目概览
 
-这是一个面向多模态岗位的工程化 Demo，重点解决三个问题：
+| 阶段 | 内容 | 硬件 |
+|------|------|------|
+| 数据准备 | Fitness-AQA 解析 → 统一 JSON | 本地 CPU |
+| SFT 微调 | LoRA (r=32) + Gradient Checkpointing + DeepSpeed Zero-2 | A100 80GB |
+| GRPO 对齐 | 自定义奖励函数（错误识别 + 时间精度） + num_generations=16 | A100 80GB |
+| 端侧推理 | 4-bit 量化，摄像头 / 视频文件，异步推理 + 实时反馈叠加 | RTX 4060 8GB |
 
-1. **8GB 显存下的 VLM 部署**（4-bit 量化 + low_cpu_mem_usage）
-2. **实时视频循环不卡顿**（异步推理 + 多线程）
-3. **输出可执行动作建议**（结构化 prompt + 可视化反馈）
+### 为什么用 GRPO 而不是 PPO
 
----
-
-## ✨ 核心亮点
-
-- **端侧部署**：Qwen2-VL-7B-Instruct + BitsAndBytes 4-bit，~5.5GB VRAM
-- **双输入模式**：摄像头实时拍摄 / 本地视频文件（mp4、mov、mkv 等）
-- **任意动作支持**：不依赖预设动作库，输入任意动作名称，VLM 自动核验并分析
-- **动作核验**：VLM 对比用户声称动作与画面内容，不符时自动识别真实动作
-- **系统设计**：采样缓冲队列 + 后台推理线程 + 回调渲染
-- **工程可维护**：`.env` 配置、模块化结构、离线模式支持
+GRPO 无需 Value Model（Critic），将同一 prompt 的多个生成结果在组内相对归一化作为优势估计，在小数据集（Fitness-AQA ~4400 条）下更稳定，且显存占用更低。
 
 ---
 
-## 📁 文件结构
+## 核心亮点
+
+**训练侧**
+- Fitness-AQA 三动作子集（深蹲/过头推举/杠铃划船）完整解析，含时间区间与帧级二值两种标注格式
+- 奖励函数四分量：格式合规 × 错误识别 × 时间精度 × 修正质量
+- LoRA 同时注入语言解码器 Attention 层与视觉-语言对齐层（`visual.merger.mlp`）
+
+**推理侧**
+- 任意动作支持：不依赖预设动作库，VLM 自动核验用户输入与画面内容是否一致
+- 双输入模式：摄像头实时拍摄 / 本地 mp4 文件
+- 采样缓冲队列 + 后台推理线程 + 回调渲染，主线程不阻塞
+
+---
+
+## 文件结构
 
 ```
 Workout-Coach/
-├── input/                    # 放置待分析的本地视频文件
-├── action_profiles.py        # 动作分析提示词构建（动态，支持任意动作）
-├── download_model.py         # 模型预下载脚本（支持 HuggingFace / ModelScope）
-├── vlm_inference.py          # VLM 推理核心（同步/异步）
-├── video_streamer.py         # 视频采样、缓冲与触发
-├── main.py                   # 主程序入口
-├── config.env.example        # 环境变量模板
-├── requirements.txt          # 依赖列表
-├── .gitignore
-└── README.md
+├── training/                       # 训练管线
+│   ├── prepare_dataset.py          # Fitness-AQA 原始格式 → 统一 JSON
+│   ├── data_builder.py             # Dataset / Collator / Tokenization
+│   ├── train_sft.py                # SFT 训练（SFTTrainer + LoRA）
+│   ├── train_grpo.py               # GRPO 对齐训练（GRPOTrainer）
+│   ├── ds_config_zero2.json        # DeepSpeed ZeRO-2 配置
+│   ├── annotations/                # 生成的 train/val/test JSON（gitignore）
+│   └── training_README.md          # 训练启动文档
+│
+├── input/                          # 放置待分析的本地视频文件
+├── action_profiles.py              # 动作分析提示词构建
+├── vlm_inference.py                # VLM 推理核心（同步/异步）
+├── video_streamer.py               # 视频采样、缓冲与触发
+├── main.py                         # 推理主程序入口
+├── download_model.py               # 模型预下载脚本
+├── config.env.example              # 环境变量模板
+└── requirements.txt                # 推理端依赖
 ```
 
 ---
 
-## ⚙️ 环境配置（Conda）
+## 快速上手
 
-### 1) 创建环境
+### 推理（本地，RTX 4060）
 
 ```bash
 conda create -n workout-coach python=3.10
 conda activate workout-coach
-```
-
-### 2) 安装 PyTorch（CUDA）
-
-```bash
 conda install pytorch::pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-```
-
-### 3) 安装项目依赖
-
-```bash
 pip install -r requirements.txt
-```
 
-### 4) 配置 `.env`
-
-```powershell
-Copy-Item config.env.example .env
-```
-
-打开 `.env`，填写模型路径（下载完成后脚本会打印）：
-
-```
-VLM_MODEL_NAME=<模型本地路径或 HF model id>
-HF_HOME=C:/Users/<你的用户名>/Desktop/Workout-Coach/hf_cache
-VLM_LOCAL_FILES_ONLY=1
-HF_HUB_OFFLINE=1
-```
-
-### 5) 下载模型
-
-**方式 A：ModelScope（国内推荐，速度快）**
-
-```bash
-pip install modelscope
+# 下载模型（国内用 ModelScope）
 python download_model.py --model Qwen/Qwen2-VL-7B-Instruct --source modelscope
-```
 
-**方式 B：HuggingFace 镜像**
+# 配置 .env
+Copy-Item config.env.example .env   # Windows PowerShell
+# 填写 VLM_MODEL_NAME、HF_HOME
 
-```bash
-python download_model.py --model Qwen/Qwen2-VL-7B-Instruct
-```
-
-下载完成后，脚本会输出建议写入 `.env` 的配置，复制粘贴即可。
-
----
-
-## 🚀 快速启动
-
-```bash
-conda activate workout-coach
 python main.py
 ```
 
-### 启动流程
+**操作流程**：启动后选择视频源 → 输入动作名称 → 文件模式自动触发 / 摄像头模式按 **S** 触发分析 → 按 **Q** 退出。
 
-1. **VLM 模型加载**（约 30 秒）
-   - 4-bit 量化加载，稳态显存占用约 5.5GB
+### 训练（A100 80GB）
 
-2. **选择视频输入源**
-   - 将视频文件放入 `input/` 目录，程序启动时自动扫描并列出
-   - 选择文件编号使用文件模式；回车或选 `0` 使用摄像头
+```bash
+# 0. 安装训练依赖
+pip install trl>=0.13 deepspeed>=0.14 flash-attn>=2.5 qwen-vl-utils --no-build-isolation
 
-3. **输入动作名称**
-   - 支持任意动作，如：深蹲、硬拉、哑铃飞鸟、引体向上、推肩……
-   - 直接回车使用默认：深蹲
+# 1. 解析 Fitness-AQA 数据集
+python training/prepare_dataset.py \
+    --dataset_root dataset/Fitness-AQA_dataset_release \
+    --output_dir   training/annotations
 
-4. **就绪**
-   - 文件模式：视频自动播放，播放结束后自动触发分析
-   - 摄像头模式：按 **S** 键触发分析
+# 2. SFT 微调
+deepspeed --num_gpus=1 training/train_sft.py \
+    --model_name_or_path hf_cache/modelscope/Qwen--Qwen2-VL-7B-Instruct \
+    --train_ann_file training/annotations/train.json \
+    --val_ann_file   training/annotations/val.json \
+    --dataset_root   dataset/Fitness-AQA_dataset_release \
+    --output_dir     checkpoints/sft
+
+# 3. GRPO 对齐
+deepspeed --num_gpus=1 training/train_grpo.py \
+    --model_name_or_path checkpoints/sft/final \
+    --train_ann_file training/annotations/train.json \
+    --dataset_root   dataset/Fitness-AQA_dataset_release \
+    --output_dir     checkpoints/grpo
+```
+
+详细参数说明见 [training/training_README.md](training/training_README.md)。
 
 ---
 
-## 🎮 快捷键
+## Fitness-AQA 数据集
 
-| 模式 | 快捷键 | 功能 |
-|------|--------|------|
-| 摄像头 | **S** | 倒计时 5 秒后录制 10 秒，发送给 VLM 分析 |
-| 文件 | **S** | 立即触发分析（使用已采样的帧） |
-| 通用 | **Q** | 退出程序 |
+| 子集 | 动作 | 媒体 | 标注格式 | 训练样本 |
+|------|------|------|---------|---------|
+| Squat | 深蹲 | 视频 | 时间区间（膝盖前伸/内扣） | 1136 |
+| OHP | 过头推举 | 视频 | 时间区间（手肘/膝盖） | 1582 |
+| ShallowSquat | 深蹲深度检测 | 图片帧 | 二值（0/1） | 440 |
+| BarbellRow | 杠铃划船 | 图片帧 | 二值（腰椎/躯干角度） | 1284 |
 
 ---
 
-## 📊 工作流说明
+## VLM 输出格式
 
 ```
-输入源（摄像头/文件）
-    → 按短边缩放（横竖屏自适应，默认 336px）
-    → 每 10 帧采 1 帧，存入缓冲队列
-    → 触发分析（按 S / 文件播放结束）
-    → 均匀抽取最多 8 帧 → VLM 异步推理
-    → 结果叠加到画面左上角（显示 4 秒）
-```
-
-### VLM 分析逻辑
-
-每次推理时，VLM 会：
-
-1. **核验动作**：对比用户声称的动作与画面内容是否一致
-   - 一致 → `【画面动作】深蹲`
-   - 不一致 → `【画面动作】硬拉（用户声称：深蹲）`
-2. **评判质量**：给出总体结论、3 个关键问题（问题/原因/修正）、下一组执行口令
-
-**输出示例**：
-
-```
-【画面动作】杠铃深蹲
-【总体结论】动作整体较为标准，但膝盖稍微内扣，需注意向外打开。
-【关键问题1】问题：膝盖内扣；原因：下降过程中膝盖未保持向外；修正：确保大腿与脚尖方向一致。
-【关键问题2】问题：背部略微前倾；原因：核心收紧不足；修正：保持脊柱中立位。
-【关键问题3】问题：杠铃位置偏高；原因：影响稳定性；修正：调整杠铃至合适背部位置。
-【下一组执行口令】1. 膝盖向外打开；2. 挺胸收核心；3. 调整杠铃位置。
+【动作识别】杠铃深蹲
+【总体结论】动作整体较为标准，但膝盖稍微内扣。
+【关键问题1】问题：膝盖内扣（约 2.3s）；原因：臀中肌激活不足；修正：下蹲时膝盖跟随脚尖方向向外推
+【关键问题2】问题：重心略偏前；原因：踝关节灵活性不足；修正：可在脚跟下垫小板辅助训练
+【关键问题3】暂无明显问题
+【下一组口令】收紧核心；膝盖向外；缓慢下降控制离心
 ```
 
 ---
 
-## ⚠️ 常见问题
-
-### Q1: 加载模型时 OOM（显存溢出）
-
-**原因**：BitsAndBytes 量化过程中的峰值显存高于稳态
-
-**解决**：已内置 `low_cpu_mem_usage=True`，权重先在 CPU 处理再搬到 GPU，消除加载峰值。若仍 OOM，关闭其他占用 GPU 的程序后重试。
-
-### Q2: 推理时间较长（约 2 分钟）
-
-**原因**：Windows 上 FlashAttention2 不可用，回退到 SDPA，7B 模型 + 8 帧正常耗时
-
-**说明**：可将 `VLM_MAX_FRAMES` 从 8 降到 6 缩短推理时间，代价是减少分析帧数。
-
-### Q3: 摄像头无法打开
-
-**解决**：关闭其他占用摄像头的程序（Teams、浏览器等）；或在 `.env` 中修改 `CAMERA_ID` / `CAMERA_BACKEND`
-
-### Q4: 下载失败（`HF_HUB_OFFLINE` 报错）
-
-**原因**：环境变量中 `HF_HUB_OFFLINE=1` 阻止了网络访问
-
-**解决**：`download_model.py` 已自动强制覆盖此开关，直接运行脚本即可，无需手动修改环境变量
-
-### Q5: ModelScope 下载后 `VLM_MODEL_NAME` 怎么填
-
-下载完成后脚本会输出类似：
-
-```
-VLM_MODEL_NAME=C:\...\hf_cache\modelscope\Qwen--Qwen2-VL-7B-Instruct
-```
-
-将该行复制到 `.env` 替换原有 `VLM_MODEL_NAME` 即可（本地路径，不是 HF model id）。
-
----
-
-## 🔧 主要配置项（`.env`）
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `VLM_MODEL_NAME` | — | 模型名称或本地路径 |
-| `VLM_MAX_FRAMES` | `8` | 发给 VLM 的最大帧数（均匀抽取） |
-| `VLM_MAX_TOKENS` | `256` | 生成最大 token 数 |
-| `TARGET_HEIGHT` | `336` | 短边缩放目标像素（横竖屏自适应） |
-| `SAMPLE_RATE` | `10` | 每 N 帧采 1 帧 |
-| `PRE_RECORD_DELAY` | `5.0` | 摄像头模式按 S 后的倒计时（秒） |
-| `RECORD_DURATION` | `10.0` | 摄像头模式录制时长（秒） |
-| `FEEDBACK_DURATION` | `4.0` | 结果在画面上显示时长（秒） |
-| `VLM_LOCAL_FILES_ONLY` | `1` | 离线模式（仅用本地缓存） |
-| `USE_FLASH_ATTENTION_2` | `True` | FlashAttention2（Windows 通常不可用，自动回退） |
-
----
-
-## 📚 技术栈
+## 技术栈
 
 | 组件 | 用途 |
 |------|------|
-| PyTorch 2.x | 深度学习框架 |
-| Transformers 4.37+ | Qwen2-VL 模型加载 |
-| BitsAndBytes | 4-bit 量化 |
-| OpenCV | 视频采集与显示 |
-| Pillow | 图像处理 |
-| Accelerate | device_map 推理加速 |
-| ModelScope（可选） | 国内模型下载 |
+| Qwen2-VL-7B-Instruct | 视觉语言基础模型 |
+| PyTorch 2.x + BF16 | 训练框架 |
+| TRL (SFTTrainer / GRPOTrainer) | 训练算法 |
+| PEFT / LoRA | 参数高效微调 |
+| DeepSpeed ZeRO-2 | 显存优化 |
+| FlashAttention-2 | 注意力加速 |
+| BitsAndBytes | 推理端 4-bit 量化 |
+| OpenCV + Pillow | 视频 / 图像处理 |
 
 ---
 
-## 📞 故障排查清单
+## 常见问题
 
-- [ ] Conda 环境已激活（`conda activate workout-coach`）
-- [ ] `torch.cuda.is_available()` 返回 `True`
-- [ ] `.env` 已创建且 `VLM_MODEL_NAME` / `HF_HOME` 填写正确
-- [ ] 模型文件完整（`hf_cache/` 下存在 safetensors 权重文件）
-- [ ] 无其他进程占用 GPU 显存
-- [ ] 摄像头模式下硬件已连接且未被占用
+**Q: 推理时显存 OOM（RTX 4060 8GB）**  
+已内置 `low_cpu_mem_usage=True`，权重先在 CPU 处理再搬 GPU。若仍 OOM，关闭其他占用 GPU 的进程。
 
----
+**Q: 摄像头无法打开**  
+关闭 Teams、浏览器等占用摄像头的程序；或在 `.env` 中修改 `CAMERA_ID` / `CAMERA_BACKEND`。
 
-## 🌐 GitHub 上传说明
+**Q: 训练时 `ModuleNotFoundError: qwen_vl_utils`**  
+```bash
+pip install qwen-vl-utils
+```
 
-`.gitignore` 已配置，以下内容不会被提交：
-
-- `.env`（含本地路径）
-- `hf_cache/`（模型权重，体积过大）
-- `input/`（本地视频文件）
-- `__pycache__/`
-
-仅保留 `config.env.example` 作为配置模板。
-
-### 项目描述建议
-
-> 在 8GB 显存受限场景下完成 Qwen2-VL-7B 端侧部署，设计双输入模式（摄像头/视频文件）的异步推理链路，支持任意健身动作的自动核验与实时纠正反馈。
+**Q: A100 上 flash-attn 编译失败**  
+将 `train_sft.py` 和 `train_grpo.py` 中的 `attn_implementation="flash_attention_2"` 改为 `"sdpa"`，性能略降约 15%。
 
 ---
 
-## 📄 许可证
+## 引用
 
-本项目为教学 / 演示用途。
+本项目使用的 Fitness-AQA 数据集：
+
+```bibtex
+@article{parmar2022domain,
+  title   = {Domain Knowledge-Informed Self-Supervised Representations for Workout Form Assessment},
+  author  = {Parmar, Paritosh and Gharat, Amol and Rhodin, Helge},
+  journal = {arXiv preprint arXiv:2202.14019},
+  year    = {2022}
+}
+```
 
 ---
 
-**祝你健身愉快！💪**
+## 许可证
+
+本项目为教学 / 研究用途。

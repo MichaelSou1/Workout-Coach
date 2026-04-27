@@ -1,0 +1,58 @@
+{
+  "_comment": "DeepSpeed ZeRO-2 配置 —— 单卡 A100 80GB，BF16，无量化",
+  "_comment_zero2": "ZeRO-2 分片优化器状态（stage 1）+ 梯度（stage 2），不分片参数（stage 3），适合单卡或少卡场景",
+
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "gradient_accumulation_steps": "auto",
+
+  "bf16": {
+    "enabled": true
+  },
+  "fp16": {
+    "enabled": false
+  },
+
+  "zero_optimization": {
+    "stage": 2,
+
+    "allgather_partitions": true,
+    "allgather_bucket_size": 2e8,
+
+    "reduce_scatter": true,
+    "reduce_bucket_size": 2e8,
+
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+
+    "offload_optimizer": {
+      "device": "none"
+    },
+    "offload_param": {
+      "device": "none"
+    }
+  },
+
+  "gradient_clipping": 1.0,
+
+  "steps_per_print": 100,
+  "wall_clock_breakdown": false,
+
+  "flops_profiler": {
+    "enabled": false,
+    "profile_step": 1,
+    "module_depth": -1,
+    "top_modules": 1,
+    "detailed": true,
+    "output_file": null
+  },
+
+  "activation_checkpointing": {
+    "partition_activations": false,
+    "cpu_checkpointing": false,
+    "contiguous_memory_optimization": false,
+    "number_checkpoints": null,
+    "synchronize_checkpoint_boundary": false,
+    "profile": false
+  }
+}

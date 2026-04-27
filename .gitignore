@@ -32,3 +32,12 @@ logs/
 *.avi
 *.mov
 *.tmp
+
+# Raw dataset（体积过大）
+dataset/
+
+# 生成物（可由 prepare_dataset.py 重建）
+training/annotations/
+
+# Claude Code 本地配置
+.claude/

@@ -62,7 +62,6 @@ SYSTEM_PROMPT = (
 
 USER_TEMPLATE = (
     "以下是一组【{action_class}】动作的连续帧截图。\n"
-    "{error_hint}"
     "请按指定格式完成分析。"
 )
 
@@ -214,30 +213,8 @@ def build_messages(
     use_grid: bool = False,
     grid_cols: int = 4,
 ) -> list[dict]:
-    """
-    生成符合 Qwen2-VL Chat Template 的 messages 列表。
-
-    error_annotations 中若有时间戳（start_time 为秒数而非帧号），
-    则在 User prompt 中提示模型关注该时间段。
-    对于图片帧数据集（ShallowSquat/BarbellRow），start_time 为帧号，不作时间提示。
-    """
-    # 判断是否有实际时间信息（视频来源的 start_time 通常 < 100s，帧号可能很大）
-    has_time = any(
-        ann.get("start_time", 9999) < 200
-        for ann in error_annotations
-    )
-
-    if has_time and error_annotations:
-        ts_list = sorted(set(ann["start_time"] for ann in error_annotations))
-        ts_str  = "、".join(f"{t:.1f}s" for t in ts_list)
-        error_hint = f"请重点关注如下时间节点（单位：秒）：{ts_str}\n"
-    else:
-        error_hint = ""
-
-    user_text = USER_TEMPLATE.format(
-        action_class=action_class,
-        error_hint=error_hint,
-    )
+    """生成符合 Qwen2-VL Chat Template 的 messages 列表。"""
+    user_text = USER_TEMPLATE.format(action_class=action_class)
 
     if use_grid:
         user_content = [
@@ -336,11 +313,9 @@ def synthesize_response(action_class: str, error_annotations: list[dict]) -> str
         "【总体结论】本组动作存在以下关键技术问题，需针对性改正。",
     ]
     for i, err in enumerate(error_annotations[:3], 1):
-        ts = err.get("start_time")
-        ts_note = f"（约 {ts:.1f}s）" if ts is not None and ts < 200 else ""
         lines.append(
             f"【关键问题{i}】"
-            f"问题：{err.get('error_cn', err.get('error_type', '动作错误'))}{ts_note}；"
+            f"问题：{err.get('error_cn', err.get('error_type', '动作错误'))}；"
             f"原因：肌肉代偿或活动度不足；"
             f"修正：{err.get('correction', '请咨询专业教练')}"
         )

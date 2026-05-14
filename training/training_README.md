@@ -126,7 +126,73 @@ input_ids: torch.Size([1842])  masked: 1651/1842
 
 ---
 
-## 3. 阶段一：SFT 微调
+## 3. 生成 SFT 参考回答（必须，在 SFT 之前运行）
+
+Fitness-AQA 只提供错误类型 + 时间戳 + 修正关键词，**不包含**教练评语文本。
+若直接用 `data_builder.py` 内置的 `synthesize_response()` 合成 GT，所有样本会共享
+同一套硬编码模板（原因永远是"肌肉代偿"，口令永远是"收紧核心"），模型会直接过拟合到
+这个模板，严重损害 SFT 效果。
+
+因此需要先用 LLM 为每条样本生成多样、自然的参考回答，写回 JSON 后再做 SFT。
+
+### 3.1 前提：裁判服务已启动
+
+参考第 5 节部署 vLLM（或使用任意 OpenAI-compatible 服务）。
+
+### 3.2 运行生成脚本
+
+```bash
+# train 集（约 3400 条，4 并发，Qwen2.5-7B 约 30-60 分钟）
+python training/generate_references.py \
+    --input_file  training/annotations/train.json \
+    --output_file training/annotations/train_with_ref.json \
+    --base_url    http://localhost:8000/v1 \
+    --model       Qwen2.5-72B-Instruct \
+    --api_key     EMPTY \
+    --workers     4
+
+# val 集
+python training/generate_references.py \
+    --input_file  training/annotations/val.json \
+    --output_file training/annotations/val_with_ref.json \
+    --base_url    http://localhost:8000/v1 \
+    --model       Qwen2.5-72B-Instruct \
+    --api_key     EMPTY \
+    --workers     4
+```
+
+生成结果示例（写入 `reference_response` 字段）：
+
+```
+【动作识别】深蹲
+【总体结论】本组动作膝盖存在明显内扣，建议重点激活臀中肌后再进行下一组。
+【关键问题1】问题：膝关节内扣（约3.2s）；原因：臀中肌力量不足，导致膝盖在负重时向内塌陷；修正：下蹲过程中主动将膝盖向脚尖外侧方向顶出，可配合弹力带辅助训练
+【关键问题2】问题：暂无明显问题
+【关键问题3】问题：暂无明显问题
+【下一组口令】膝盖向外顶；足跟踩地；慢下快上
+```
+
+### 3.3 参数说明
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--workers` | 4 | 并发线程数；受 API QPS 限制，本地 vLLM 可适当加大 |
+| `--model` | Qwen2.5-72B-Instruct | 更大的模型生成质量更高；7B 速度更快 |
+| `--overwrite` | False | 加此参数可重新生成已有 reference_response 的样本 |
+| `--timeout` | 60.0 | 单次请求超时秒数 |
+
+### 3.4 SFT 时使用生成后的文件
+
+在 SFT 命令中将 `--train_ann_file` 和 `--val_ann_file` 改为带 `_with_ref` 的版本：
+
+```bash
+--train_ann_file training/annotations/train_with_ref.json \
+--val_ann_file   training/annotations/val_with_ref.json
+```
+
+---
+
+## 4. 阶段一：SFT 微调（使用上一步生成的 train_with_ref.json）
 
 ### 3.1 启动命令
 
@@ -206,7 +272,7 @@ tensorboard --logdir checkpoints/sft/runs
 
 ---
 
-## 4. 阶段二：GRPO 对齐（纯 RLAIF）
+## 5. 阶段二：GRPO 对齐（纯 RLAIF）
 
 GRPO 的奖励信号**完全来自 LLM 裁判 API**，训练前必须先完成裁判服务部署。
 
@@ -339,7 +405,7 @@ A100 80GB 单卡（ZeRO-2）:
 
 ---
 
-## 5. 训练后使用微调模型
+## 6. 训练后使用微调模型
 
 ### 5.1 加载 LoRA Adapter
 
@@ -370,7 +436,7 @@ VLM_MODEL_NAME=checkpoints/grpo/final
 
 ---
 
-## 6. 常见问题
+## 7. 常见问题
 
 **Q: GRPO 训练中 reward 全为 0.5**  
 裁判 API 调用失败时会回退到中性分 0.5。排查步骤：
@@ -402,11 +468,12 @@ RTX3060 无 NVLink，all-reduce 走 PCIe（~30 GB/s vs NVLink 600 GB/s），比 
 
 ---
 
-## 7. 文件清单
+## 8. 文件清单
 
 ```
 training/
 ├── prepare_dataset.py        # Fitness-AQA 原始格式 → 统一 JSON
+├── generate_references.py    # 调用 LLM 批量生成 SFT 参考回答（SFT 前必须运行）
 ├── data_builder.py           # Dataset / Collator / Tokenization
 ├── train_sft.py              # SFT 训练管线
 ├── train_grpo.py             # GRPO 对齐训练管线（纯 RLAIF）

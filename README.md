@@ -50,6 +50,7 @@
 Workout-Coach/
 ├── training/
 │   ├── prepare_dataset.py        # Fitness-AQA 原始格式 → 统一 JSON
+│   ├── generate_references.py    # LLM 批量生成 SFT 参考回答（SFT 前必须运行）
 │   ├── data_builder.py           # Dataset / Collator / Tokenization
 │   ├── train_sft.py              # SFT 训练（SFTTrainer + LoRA）
 │   ├── train_grpo.py             # GRPO 对齐（GRPOTrainer + RLAIF）

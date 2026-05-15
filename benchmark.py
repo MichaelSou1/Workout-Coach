@@ -88,10 +88,22 @@ def load_video_frames(
     video_path: str,
     max_frames: int = 8,
     target_height: int = 336,
+    sampling: str = "phase_anchored",
+    action_type: str = "",
+    pre_sample_rate: int = 1,
 ):
-    """读取整个视频 → 均匀抽帧 → 等比缩放 → PIL RGB。"""
+    """
+    读取视频 → 抽帧 → 等比缩放 → PIL RGB。
+
+    抽帧策略：
+      - "phase_anchored"（默认）：先按 pre_sample_rate 粗采样得到候选池，
+        再用 MediaPipe 主导关节角度锚定 起始/底部/顶点/结束，最后按间隔比例补齐到 max_frames。
+        姿态覆盖率不足时自动退化为均匀采样。
+      - "uniform"：直接在原始帧序列上均匀抽 max_frames 帧（评测均匀基线时使用）。
+    """
     import cv2
     from PIL import Image
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"无法打开视频: {video_path}")
@@ -107,15 +119,7 @@ def load_video_frames(
     if not all_frames:
         raise RuntimeError(f"视频无可读帧: {video_path}")
 
-    # 均匀抽帧
-    if len(all_frames) > max_frames:
-        step = len(all_frames) / max_frames
-        sampled = [all_frames[int(i * step)] for i in range(max_frames)]
-    else:
-        sampled = all_frames
-
-    pil_frames = []
-    for f in sampled:
+    def _to_pil(f):
         rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
         h, w = rgb.shape[:2]
         short = min(h, w)
@@ -124,8 +128,32 @@ def load_video_frames(
             new_w = int(round(w * scale))
             new_h = int(round(h * scale))
             rgb = cv2.resize(rgb, (new_w, new_h))
-        pil_frames.append(Image.fromarray(rgb))
-    return pil_frames
+        return Image.fromarray(rgb)
+
+    if sampling == "uniform":
+        if len(all_frames) > max_frames:
+            step = len(all_frames) / max_frames
+            sampled = [all_frames[int(i * step)] for i in range(max_frames)]
+        else:
+            sampled = all_frames
+        return [_to_pil(f) for f in sampled]
+
+    # phase_anchored：先粗采样得到候选池（与运行时 SAMPLE_RATE 对齐，控制 MediaPipe 调用次数），
+    # 再交给 tools.select_frames 做锚定抽帧
+    pre = max(1, pre_sample_rate)
+    candidates = all_frames[::pre] if pre > 1 else all_frames
+    candidate_pils = [_to_pil(f) for f in candidates]
+
+    if len(candidate_pils) <= max_frames:
+        return candidate_pils
+
+    from tools import select_frames
+    return select_frames(
+        candidate_pils,
+        action_type=action_type,
+        max_frames=max_frames,
+        strategy="phase_anchored",
+    )
 
 
 def _peak_mem_gb_all_devices() -> float:
@@ -340,6 +368,18 @@ def main():
     parser.add_argument("--modes", nargs="+", default=["non_agentic", "agentic"], choices=["non_agentic", "agentic"])
     parser.add_argument("--greedy", action="store_true", help="强制贪心解码（消除采样方差）")
     parser.add_argument("--limit", type=int, default=0, help="限制视频数量（调试用）")
+    parser.add_argument(
+        "--sampling",
+        choices=["phase_anchored", "uniform"],
+        default=os.getenv("FRAME_SAMPLING_STRATEGY", "phase_anchored"),
+        help="抽帧策略：phase_anchored（默认，借鉴 HiERO 思路）/ uniform（旧基线）",
+    )
+    parser.add_argument(
+        "--pre-sample-rate",
+        type=int,
+        default=int(os.getenv("BENCH_PRE_SAMPLE_RATE", "1")),
+        help="phase_anchored 模式下，先按此步长粗采样视频再做锚定（控制 MediaPipe 调用次数）",
+    )
     args = parser.parse_args()
 
     if args.greedy:
@@ -411,8 +451,11 @@ def main():
                 str(video_path),
                 max_frames=args.max_frames,
                 target_height=args.target_height,
+                sampling=args.sampling,
+                action_type=declared_action,
+                pre_sample_rate=args.pre_sample_rate,
             )
-            logger.info(f"[Bench] 加载 {len(frames)} 帧")
+            logger.info(f"[Bench] 加载 {len(frames)} 帧 (策略={args.sampling})")
         except Exception as e:
             logger.error(f"[Bench] 视频加载失败: {e}")
             continue

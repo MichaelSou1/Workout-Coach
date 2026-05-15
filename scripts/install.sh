@@ -93,6 +93,17 @@ for pkg in ["torch", "sglang", "flashinfer", "transformers", "openai", "mediapip
         print(f"  {pkg:<14}❌ 未安装: {e}")
 PY
 
+# mediapipe 是默认抽帧策略 phase_anchored 的依赖；若缺失要给出明确提示
+${PYTHON_BIN} - <<'PY'
+try:
+    import mediapipe  # noqa: F401
+    print("[install] ✓ mediapipe 可用 — 相位锚定抽帧 (phase_anchored) 将生效")
+except Exception as e:
+    print("[install] ⚠️  mediapipe 不可用:", e)
+    print("           主流程会自动退化为均匀抽帧 (uniform)")
+    print("           agentic 工具 get_pose_angles / detect_phase_boundaries 同样不可用")
+PY
+
 echo ""
 echo "============================================================"
 echo "[install] ✓ 完成"

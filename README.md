@@ -15,10 +15,11 @@
 - **SGLang 推理后端**:独立 server 进程,OpenAI 兼容 API。RadixAttention 自动复用 agentic 多轮的公共前缀 KV cache,降低多轮延迟
 - **Agentic 工具调用循环**:模型按 ReAct 协议输出 `Action:` / `Action_Input:`,runtime 执行工具并把 Observation 回灌,最多 3 轮迭代
 - **MediaPipe 姿态工具**:`get_pose_angles`(指定帧的 7 个关节角度)+ `detect_phase_boundaries`(自动定位起始/底部/顶点/结束)
+- **相位锚定抽帧**(默认):送 VLM 前先用 MediaPipe 主导关节角度锚定 起始/底部/顶点/结束 4 个关键帧,剩余预算按时间间隔比例补齐;借鉴 HiERO 用语义聚类挑代表帧的思路,但用关节角度替代视频特征,无需训练
 - **任意动作支持**:不依赖预设动作库,模型先识别画面里的实际动作,与用户声明对比后再评估
 - **双输入模式**:摄像头实时拍摄 / 本地 mp4 文件,按 **S** 触发分析、**Q** 退出
 - **多卡并行**:在 SGLang server 启动时通过 `--dp-size` / `--tp-size` 配置,客户端无需关心
-- **内置对比评测脚本**:`benchmark.py` 对比 agentic vs 非 agentic 在延迟、格式合规、动作识别、问题填充等维度上的差异
+- **内置对比评测脚本**:`benchmark.py` 对比 agentic vs 非 agentic、phase_anchored vs uniform 在延迟、格式合规、动作识别、问题填充等维度上的差异
 
 ---
 
@@ -187,6 +188,57 @@ Action_Input: {"frame_indices": [3, 4, 5]}
 
 ---
 
+## 抽帧策略 (Phase-Anchored Sampling)
+
+送给 VLM 的最终帧数受 `VLM_MAX_FRAMES`(默认 8)限制。怎么从一段几秒的视频里挑这 8 帧,决定模型能不能看到关键动作瞬间。
+
+```mermaid
+flowchart LR
+    raw[原始帧序列<br/>~30 fps × N 秒]
+    cap[采集时 sample_rate<br/>降采样到 ~3 fps]
+    pose[MediaPipe 主导关节<br/>角度序列]
+    anchor[锚点: 起始 / 底部 /<br/>顶点 / 结束]
+    fill[按相邻锚点间隔<br/>比例补足到 max_frames]
+    out[送 VLM 的 max_frames 帧]
+
+    raw --> cap --> pose --> anchor --> fill --> out
+    cap -. 姿态覆盖 &lt; 50% .-> uni[均匀抽帧 fallback]
+    uni --> out
+
+    style anchor fill:#fff4d6
+    style uni fill:#ffe0e0
+```
+
+| 策略 | 行为 | 适用 |
+|---|---|---|
+| `phase_anchored`(默认) | MediaPipe 算每帧主导关节(深蹲=膝,卧推=肘)角度;取 min/max 作底部/顶点,首尾作起始/结束;剩余预算按锚点间隔比例分配 | 真实健身视频(几秒一次完整 rep) |
+| `uniform` | 索引按 `step=N/max_frames` 等步长取 | 与旧版对比基线 / mediapipe 不可用时的 fallback |
+
+**为什么是这个设计**:论文 HiERO 的核心论点是"均匀抽帧会浪费帧预算在冗余片段上,按语义聚类挑代表帧更好"。本项目场景比 HiERO 简单得多——10 秒、单一动作、相位结构清晰——所以不需要 HiERO 那套图网络+谱聚类,直接拿 MediaPipe 关节角度的极值点当语义锚点就够了。
+
+**触发条件**: `len(frames) > max_frames` 时才会启用;不超时直接返回全部。
+
+**退化逻辑**:
+- 未安装 mediapipe → 警告日志 + 均匀采样
+- 姿态可检测率 < 50% (动作太快/手机抖/人物不在画面) → 警告日志 + 均匀采样
+
+**关键代码**: [tools.py](tools.py) 的 `select_frames` / `phase_anchored_indices`,调用方在 [main.py](main.py)`on_analysis_request` 和 [benchmark.py](benchmark.py)`load_video_frames`。
+
+**评测对比**:
+
+```bash
+# 旧基线(均匀抽帧)
+python benchmark.py --video-dir input/ --runs 3 --sampling uniform
+
+# 新默认(相位锚定)
+python benchmark.py --video-dir input/ --runs 3 --sampling phase_anchored
+
+# 用 FRAME_SAMPLING_STRATEGY 也可统一切换 main.py 和 benchmark.py
+FRAME_SAMPLING_STRATEGY=uniform python main.py
+```
+
+---
+
 ## SGLang Server 配置
 
 server 端控制所有推理参数(量化、精度、多卡并行、FlashAttention 等)。客户端进程不感知这些设置。
@@ -283,6 +335,7 @@ Agentic 模式中间轮次会先输出 `Thought:` / `Action:` / `Action_Input:`(
 | `VLM_MODEL_NAME` | `Qwen/Qwen3-VL-8B-Instruct` | chat completion 请求中的 model 字段 |
 | `VLM_MAX_TOKENS` | `512` | 单轮最大生成 token |
 | `VLM_MAX_FRAMES` | `8` | 发给 VLM 的最大帧数 |
+| `FRAME_SAMPLING_STRATEGY` | `phase_anchored` | 抽帧策略:`phase_anchored`(默认,MediaPipe 锚定相位)/ `uniform`(旧均匀基线) |
 | `VLM_DO_SAMPLE` | `1` | 1=采样,0=贪心 |
 | `VLM_TEMPERATURE` / `VLM_TOP_P` / `VLM_REPETITION_PENALTY` | `0.6/0.9/1.05` | 采样参数 |
 | `AGENT_MAX_ITER` | `3` | Agentic 循环上限 |

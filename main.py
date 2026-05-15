@@ -13,6 +13,7 @@ from PIL import Image
 from agent_loop import AgenticAnalyzer
 from vlm_inference import FitnessVLMClient
 from video_streamer import VideoStreamer
+from tools import select_frames
 
 # 配置日志
 logging.basicConfig(
@@ -148,13 +149,18 @@ def on_analysis_request(frames: List[Image.Image], action_type: str):
 
     is_analyzing = True
 
-    # 均匀抽帧，避免帧数过多稀释注意力
+    # 相位锚定抽帧：用 MediaPipe 主导关节角度的极值定位起始/底部/顶点/结束，
+    # 剩余预算按相邻锚点的时间间隔比例补足；姿态覆盖不足时自动退化为均匀采样。
+    # 可用 FRAME_SAMPLING_STRATEGY=uniform 切回均匀采样。
     max_frames = _env_int("VLM_MAX_FRAMES", 8)
-    if len(frames) > max_frames:
-        step = len(frames) / max_frames
-        frames = [frames[int(i * step)] for i in range(max_frames)]
+    original_count = len(frames)
+    frames = select_frames(frames, action_type=action_type, max_frames=max_frames)
 
-    logger.info(f"[Main] 开始 agentic 推理 {len(frames)} 帧，动作类型: {action_type}")
+    logger.info(
+        f"[Main] 开始 agentic 推理 {len(frames)} 帧 "
+        f"(原始 {original_count} 帧, 策略={os.getenv('FRAME_SAMPLING_STRATEGY', 'phase_anchored')}), "
+        f"动作类型: {action_type}"
+    )
     video_streamer.set_feedback(f"分析中(agentic): {action_type}", duration=2.0)
 
     agent.analyze_async(

@@ -17,8 +17,14 @@
 openai>=1.40.0                # OpenAI 兼容 API 客户端（SGLang 实现该协议）
 httpx>=0.27.0                 # openai 内部依赖；显式列出以稳定版本
 
-# --- Agentic 工具：MediaPipe 姿态关键点 ---
-mediapipe>=0.10.0             # CPU，~5-10ms/帧；姿态角度提取
+# --- MediaPipe 姿态关键点（CPU，~5-10ms/帧） ---
+# 用途：
+#   1. 默认抽帧策略 phase_anchored（tools.select_frames）依赖它定位
+#      起始/底部/顶点/结束 四个相位锚点（参考 HiERO 的语义聚类思想，
+#      用关节角度直接定位相位，替代均匀抽帧）
+#   2. Agentic 工具 get_pose_angles / detect_phase_boundaries 也依赖它
+# 卸装/不可用时，select_frames 会自动退化为均匀采样
+mediapipe>=0.10.0
 
 # --- 视频 / 图像处理 ---
 opencv-python>=4.8.0          # 视频流捕获 / benchmark 视频加载

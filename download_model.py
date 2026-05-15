@@ -2,15 +2,15 @@
 离线模型下载脚本（支持 Hugging Face 镜像 / 魔搭社区 ModelScope）
 
 用途：
-1) 预下载 Qwen2-VL 系列模型到本地缓存
+1) 预下载 Qwen3-VL 系列模型到本地缓存
 2) 后续可在离线模式启动 main.py
 
 常用命令：
   # HuggingFace 镜像（hf-mirror.com）
-  python download_model.py --model Qwen/Qwen2-VL-7B-Instruct
+  python download_model.py --model Qwen/Qwen3-VL-8B-Instruct
 
   # 魔搭社区（ModelScope，国内速度更快）
-  python download_model.py --model Qwen/Qwen2-VL-7B-Instruct --source modelscope
+  python download_model.py --model Qwen/Qwen3-VL-8B-Instruct --source modelscope
 """
 
 import argparse
@@ -21,7 +21,7 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 
 
-DEFAULT_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 DEFAULT_MIRROR = "https://hf-mirror.com"
 
 
@@ -126,10 +126,11 @@ def _download_modelscope(args, cache_dir: Path) -> int:
     print(f"[download_model] local path   : {snapshot_path}")
     print("\n[download_model] 请将以下配置写入 .env：")
     print(f"VLM_MODEL_NAME={snapshot_path}")
-    print("VLM_LOCAL_FILES_ONLY=1")
     print("HF_HUB_OFFLINE=1")
     print("HF_DATASETS_OFFLINE=1")
-    print("\n[download_model] 然后运行: python main.py")
+    print("\n[download_model] 启动 SGLang server:")
+    print(f"  VLM_MODEL_NAME={snapshot_path} bash scripts/launch_sglang.sh")
+    print("[download_model] 另开终端运行客户端: python main.py")
     return 0
 
 
@@ -202,13 +203,15 @@ def _download_huggingface(args, cache_dir: Path) -> int:
 
 
 def _print_hf_env(model: str, cache_dir: Path, local_model_dir: Path = None):
+    model_path = local_model_dir if local_model_dir else model
     print("\n[download_model] 请将以下配置写入 .env：")
-    print(f"VLM_MODEL_NAME={local_model_dir if local_model_dir else model}")
+    print(f"VLM_MODEL_NAME={model_path}")
     print(f"HF_HOME={cache_dir}")
-    print("VLM_LOCAL_FILES_ONLY=1")
     print("HF_HUB_OFFLINE=1")
     print("HF_DATASETS_OFFLINE=1")
-    print("\n[download_model] 然后运行: python main.py")
+    print("\n[download_model] 启动 SGLang server:")
+    print(f"  VLM_MODEL_NAME={model_path} bash scripts/launch_sglang.sh")
+    print("[download_model] 另开终端运行客户端: python main.py")
 
 
 if __name__ == "__main__":

@@ -16,8 +16,13 @@ env/
 # Local model weights / Hugging Face cache
 hf_cache/
 cache/
+model_cache/
 *.safetensors
 *.bin
+
+# 输入视频和评测产物
+input/
+bench_results/
 
 # IDE / OS
 .vscode/
@@ -32,12 +37,6 @@ logs/
 *.avi
 *.mov
 *.tmp
-
-# Raw dataset（体积过大）
-dataset/
-
-# 生成物（可由 prepare_dataset.py 重建）
-training/annotations/
 
 # Claude Code 本地配置
 .claude/

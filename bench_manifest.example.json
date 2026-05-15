@@ -1,0 +1,37 @@
+[
+  {
+    "file": "squat_01.mp4",
+    "action": "深蹲",
+    "notes": "标准动作"
+  },
+  {
+    "file": "squat_knee_in.mp4",
+    "action": "深蹲",
+    "notes": "膝内扣明显"
+  },
+  {
+    "file": "squat_partial.mp4",
+    "action": "深蹲",
+    "notes": "深度不足"
+  },
+  {
+    "file": "deadlift_01.mp4",
+    "action": "硬拉",
+    "notes": "标准动作"
+  },
+  {
+    "file": "deadlift_round_back.mp4",
+    "action": "硬拉",
+    "notes": "腰部弓背"
+  },
+  {
+    "file": "bench_press_01.mp4",
+    "action": "卧推",
+    "notes": "标准动作"
+  },
+  {
+    "file": "mislabel_squat_as_deadlift.mp4",
+    "action": "硬拉",
+    "notes": "实际是深蹲但故意标为硬拉，测试动作识别能力"
+  }
+]

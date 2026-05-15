@@ -10,8 +10,8 @@ from typing import List
 
 from PIL import Image
 
-from action_profiles import build_prompts
-from vlm_inference import FitnessVLM
+from agent_loop import AgenticAnalyzer
+from vlm_inference import FitnessVLMClient
 from video_streamer import VideoStreamer
 
 # 配置日志
@@ -82,6 +82,7 @@ def _env_int(name: str, default: int) -> int:
 # ============================================================================
 
 vlm_model = None
+agent = None
 video_streamer = None
 is_analyzing = False
 
@@ -133,38 +134,33 @@ def on_analysis_request(frames: List[Image.Image], action_type: str):
         frames: PIL Image 列表
         action_type: 动作类型（squat/deadlift/bench_press）
     """
-    global is_analyzing, vlm_model
-    
+    global is_analyzing, agent
+
     if is_analyzing:
         logger.warning("[Main] 已有分析在进行中，忽略此请求")
         video_streamer.set_feedback("分析中，请稍候...", duration=1.0)
         return
 
-    if not vlm_model:
-        logger.error("[Main] VLM 模型未初始化")
+    if agent is None:
+        logger.error("[Main] AgenticAnalyzer 未初始化")
         video_streamer.set_feedback("模型未就绪，请检查", duration=2.0)
         return
 
     is_analyzing = True
-    system_prompt, user_query = build_prompts(action_type)
 
-    # 均匀抽帧，避免帧数过多导致 2B 模型注意力分散
+    # 均匀抽帧，避免帧数过多稀释注意力
     max_frames = _env_int("VLM_MAX_FRAMES", 8)
     if len(frames) > max_frames:
         step = len(frames) / max_frames
         frames = [frames[int(i * step)] for i in range(max_frames)]
 
-    logger.info(f"[Main] 开始异步推理 {len(frames)} 帧，动作类型: {action_type}")
-    video_streamer.set_feedback(f"分析中: {action_type}", duration=2.0)
+    logger.info(f"[Main] 开始 agentic 推理 {len(frames)} 帧，动作类型: {action_type}")
+    video_streamer.set_feedback(f"分析中(agentic): {action_type}", duration=2.0)
 
-    max_new_tokens = _env_int("VLM_MAX_TOKENS", 256)
-
-    vlm_model.analyze_fitness_frames_async(
+    agent.analyze_async(
         frames=frames,
-        system_prompt=system_prompt,
-        user_query=user_query,
+        action_type=action_type,
         callback=on_vlm_result,
-        max_new_tokens=max_new_tokens,
     )
 
 
@@ -173,37 +169,36 @@ def on_analysis_request(frames: List[Image.Image], action_type: str):
 # ============================================================================
 
 def initialize_vlm():
-    """初始化 VLM 模型。"""
-    global vlm_model
-    
-    logger.info("[Main] ========== 初始化 VLM 模型 ==========")
-    
+    """连接 SGLang server + 构造 AgenticAnalyzer。"""
+    global vlm_model, agent
+
+    logger.info("[Main] ========== 连接 SGLang server ==========")
+
     try:
-        model_name = os.getenv("VLM_MODEL_NAME", "Qwen/Qwen2-VL-2B-Instruct")
-        device = os.getenv("VLM_DEVICE", "cuda")
+        model_name = os.getenv("VLM_MODEL_NAME", "Qwen/Qwen3-VL-8B-Instruct")
+        endpoint = os.getenv("SGLANG_ENDPOINT", "http://127.0.0.1:30000")
         verbose = _env_bool("VERBOSE", True)
-        local_files_only = _env_bool("VLM_LOCAL_FILES_ONLY", False)
-        use_flash_attention_2 = _env_bool("USE_FLASH_ATTENTION_2", True)
-        cache_dir = os.getenv("HF_HOME") or os.getenv("TRANSFORMERS_CACHE")
+        timeout = float(os.getenv("SGLANG_TIMEOUT", "300"))
 
-        hf_endpoint = os.getenv("HF_ENDPOINT") or os.getenv("HUGGINGFACE_HUB_ENDPOINT")
-        if hf_endpoint:
-            logger.info(f"[Main] 使用 Hugging Face 镜像端点: {hf_endpoint}")
-        if local_files_only:
-            logger.info("[Main] 离线模式已启用（仅使用本地缓存）")
-        if cache_dir:
-            logger.info(f"[Main] 模型缓存目录: {cache_dir}")
+        logger.info(f"[Main] SGLang endpoint: {endpoint}")
+        logger.info(f"[Main] 模型: {model_name}")
 
-        vlm_model = FitnessVLM(
+        vlm_model = FitnessVLMClient(
+            endpoint=endpoint,
             model_name=model_name,
-            device=device,
+            timeout=timeout,
             verbose=verbose,
-            hf_endpoint=hf_endpoint,
-            local_files_only=local_files_only,
-            cache_dir=cache_dir,
-            use_flash_attention_2=use_flash_attention_2,
         )
-        logger.info("[Main] ✓ VLM 模型初始化完成")
+        logger.info("[Main] ✓ VLM 客户端就绪")
+
+        max_iter = _env_int("AGENT_MAX_ITER", 3)
+        max_new_tokens = _env_int("VLM_MAX_TOKENS", 512)
+        agent = AgenticAnalyzer(
+            vlm_client=vlm_model,
+            max_iterations=max_iter,
+            max_new_tokens=max_new_tokens,
+        )
+        logger.info(f"[Main] ✓ AgenticAnalyzer 初始化完成 (max_iter={max_iter})")
         return True
     
     except Exception as e:
@@ -362,7 +357,7 @@ def _select_action_from_cli() -> str:
 
 def main():
     """主程序入口。"""
-    model_name = os.getenv("VLM_MODEL_NAME", "Qwen/Qwen2-VL-2B-Instruct")
+    model_name = os.getenv("VLM_MODEL_NAME", "Qwen/Qwen3-VL-8B-Instruct")
     pre_record_delay = _env_float("PRE_RECORD_DELAY", 5.0)
     record_duration = _env_float("RECORD_DURATION", 10.0)
     feedback_duration = _env_float("FEEDBACK_DURATION", 4.0)
@@ -371,10 +366,9 @@ def main():
     logger.info("   🏋️ Fitness Coach - 多模态健身动作指导系统 🏋️")
     logger.info("=" * 70)
     logger.info("")
-    logger.info("[Main] 硬件信息:")
-    logger.info("  - GPU: NVIDIA GeForce RTX 4060 (8GB VRAM)")
-    logger.info(f"  - Model: {model_name} (4-bit quantization)")
-    logger.info("  - OS: Windows 11")
+    logger.info(f"[Main] 模型: {model_name}")
+    logger.info(f"[Main] SGLang endpoint: {os.getenv('SGLANG_ENDPOINT', 'http://127.0.0.1:30000')}")
+    logger.info(f"[Main] AGENT_MAX_ITER: {os.getenv('AGENT_MAX_ITER', '3')}")
     logger.info("")
     
     # 初始化 VLM

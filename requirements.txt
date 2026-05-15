@@ -1,40 +1,39 @@
 # ============================================================================
-# Workout Coach - Multimodal Fitness Action Correction System
+# Workout Coach - 客户端依赖
 # ============================================================================
-# 推荐安装步骤（Windows + CUDA 11.8）：
-# 
-# 1. 创建 Conda 环境：
-#    conda create -n workout-coach python=3.10
-#    conda activate workout-coach
+# 重要：必须使用 scripts/install.sh 按正确顺序安装。
+# 不要直接 `pip install -r requirements.txt`！
+# 直接安装会让 pip 同时解析 torch / sglang / flashinfer，
+# 解出来的版本经常互不兼容（pip 不感知 wheel 间的 CUDA 一致性）。
 #
-# 2. 安装 PyTorch with CUDA（选择合适的版本）：
-#    # 对于 RTX 4060 建议使用 CUDA 11.8 或 12.1
-#    conda install pytorch::pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-#    # 或使用 pip：
-#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-#
-# 3. 安装其他依赖：
-#    pip install -r requirements.txt
-#
+# 正确安装顺序（install.sh 已封装）：
+#   1. PyTorch  (匹配本机 CUDA 的 wheel index)
+#   2. FlashInfer (匹配 PyTorch 主次版本和 CUDA 的 wheel)
+#   3. sglang[all] (从 PyPI)
+#   4. 本文件中的 leaf 依赖（必须最后，否则可能反向覆盖 torch / sglang）
 # ============================================================================
 
-# 核心 LLM 和视觉模型依赖
-transformers>=4.37.0          # 用于 Qwen2-VL-2B-Instruct 模型加载和推理
-huggingface_hub>=0.20.3       # 模型快照下载（离线缓存）
-accelerate>=0.25.0            # 模型加速和分布式推理优化
-peft>=0.7.1                   # 参数高效微调库，支持 LoRA 等
+# --- 客户端调用 SGLang server ---
+openai>=1.40.0                # OpenAI 兼容 API 客户端（SGLang 实现该协议）
+httpx>=0.27.0                 # openai 内部依赖；显式列出以稳定版本
 
-# 显存优化（4-bit 量化）
-bitsandbytes>=0.41.3          # Windows 环境需要 >=0.41.3 版本以支持 4-bit 量化
+# --- Agentic 工具：MediaPipe 姿态关键点 ---
+mediapipe>=0.10.0             # CPU，~5-10ms/帧；姿态角度提取
 
-# 计算机视觉和图像处理
-opencv-python>=4.8.0          # 视频流捕获和处理
-pillow>=10.0.0                # PIL 图像处理库
+# --- 视频 / 图像处理 ---
+opencv-python>=4.8.0          # 视频流捕获 / benchmark 视频加载
+pillow>=10.0.0                # PIL 图像处理 + base64 编码
 numpy>=1.24.0                 # 数值计算
 
-# 工具和实用库
-python-dotenv>=1.0.0          # 环境变量管理
-tqdm>=4.66.0                  # 进度条显示
+# --- 模型下载 / 工具 ---
+huggingface_hub>=0.20.3       # download_model.py 用于离线缓存
+python-dotenv>=1.0.0          # .env 加载（可选，main.py 也有内置 fallback）
+tqdm>=4.66.0                  # 进度条
+loguru>=0.7.2                 # 高级日志（可选）
 
-# 可选：日志和调试
-loguru>=0.7.2                 # 高级日志库
+# ============================================================================
+# 不在此文件中的核心依赖（由 install.sh 单独安装）：
+#   torch / torchvision        — 必须匹配本机 CUDA
+#   flashinfer-python          — SGLang 默认 attention backend
+#   sglang[all]                — 推理服务端 + transformers/triton 等
+# ============================================================================
